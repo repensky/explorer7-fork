@@ -1,60 +1,30 @@
 <p align=center>
-  <img src="https://github.com/user-attachments/assets/eea4492b-9637-4f43-9f88-7a5df14d35ef" />
+  <img width="232" height="119" alt="image" src="https://github.com/user-attachments/assets/afac16b5-13fa-4eeb-81d2-574f8feb2197" />
 </p>
 
 
 explorer7 is a **wrapper library** that allows Windows 7's explorer.exe to run properly on modern Windows versions, aiming to resurrect the original Windows 7 shell experience.
 
+**This project was forked from [Explorer7 but I won't sue you](https://github.com/Win10to7/explorer7-but-i-wont-sue-you) and not regular Explorer7. This fork follows the GPLv3 license without the extra terms that are not compliant with the GPLv3 license.**
 
-This fork was made due to repeated GPLv3 violations by the [original repository owner](https://github.com/marp/win10-to-win7-transformation-pack/issues/3) [Archive](https://web.archive.org/web/20251030151550/https://github.com/marp/win10-to-win7-transformation-pack/issues/3) [2](https://files.catbox.moe/oxl8r9.png)
+This fork was made to add specific changes for the Ex7 option in the upcoming Windows 10 to 7 Transformation Pack update **and will not work like regular Explorer7**.
 
-This fork acts as a drop-in replacement for Explorer7. Upstream is treated with minimal trust, therefore commits from upstream and the dependencies owned by ittrgrey are reviewed to avoid supply-chain attacks.
-<details>
-  <summary>Screenshots</summary>
-
-<p align=center>
-TBD
-  <br>
-    <i>The start menu in the default view.</i>
-  <br>
-TBD
-  <br>
-    <i>The start menu in the programs view.</i>
-  <br>
-TBD
-  <br>
-    <i>The taskbar jumplist and tray overflow.</i>
-  <br>
-</p>
-
-</details>
-
-## Known issues (Milestone 2 Update 3, last modified 2025-07-29)
+## Known issues (Milestone 2 Update 3, last modified 2026-06-07)
 These issues, unless specified to have been resolved in a later Windows version, are persistent across subsequent versions of Windows from their introduction.
 
 **MAKE SURE YOU READ THESE FIRST SO YOU ARE AWARE OF WHAT YOU ARE GETTING INTO!**
 
-**Windows 8.1**
-- No proper strings are contained for the "Customize Start Menu" dialog (fixed system-wide in Windows 10).
-
 **Windows 10**
 - Autoplay does not work (1507+).
 - When ColorizationOptions is set to 0, system msstyles with the name "aero.msstyles" will result in the start menu and taskbar using the wrong color (1809+).
-- "Notification Area Icon" settings in Control Panel are missing (1507+).
 - The taskbar might overlap fullscreen applications whilst immersive shell is enabled (1507+).
 - If a user has StartIsBack++ installed, it may attempt to erroneously hook the shell, causing both visual and functional issues.
-
-**Windows 11**
-- BlurBehind colorization mode no longer works due to the removal of the relevant accent policy (22H2+).
-- Taskbar and start menu pin creation is broken due to an internal shell32.dll code logic change (24H2+, 23H2 January 2025 Update+).
-- Immersive shell support does not function correctly, and cannot launch applications (Insider 25H2+).
 
 **Windows 7 limitations/bugs**
 
 All of the following are bugs or limitations within Windows 7's explorer itself, and will not be accounted for:
 
 - Multi-monitor taskbars are not supported. These were later introduced in Windows 8 build 7779.
-- Startup items defined in the modern Task Manager are not correctly accounted for - you must use the old msconfig.exe.
 - It takes a few minutes for changes to the size and position of the taskbar to be written to the registry; restarting Explorer too quickly will revert these changes.
 - Whilst small taskbar icons are enabled, changing the position to `Top` or `Bottom` from the properties window (NOT from dragging) will result in extra space being allocated between the taskbar and the working area.
 
@@ -149,14 +119,14 @@ These options are located under `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\Cu
 
 | Name | Type | Description | Default Value |
 | ---- | ---- | ----------- | ------------- |
-| Theme | REG_SZ | Name of the theme file to use. This is relative to the installation directory. For example, `"aero"` will use the theme at `"explorer7\theme\aero.msstyles"`, `"Aero\aero"` will use the theme at `"explorer7\theme\Aero\aero.msstyles"`. If this is not specified, `aero` will be used. | **aero** |
-| OrbDirectory | REG_SZ | Name of the orb images directory to use. This is relative to the installation directory. For example, `"6801"` will use the orb images located at `"explorer7\orbs\6801\"`, `"Orb1\6801"` will use the orbs located at `"explorer7\orbs\Orb1\6801\"`. If this is not specified, the internal explorer image will be used.| **default** |
+| Theme | REG_SZ / REG_EXPAND_SZ | Optional inactive theme override. A bare value like `"custom"` loads `Themes\custom.msstyles` next to `explorer.exe`, falling back to the legacy `Theme\custom.msstyles` folder if present; a full path loads that `.msstyles` directly. When unset, explorer7 automatically selects `aero.msstyles`, `aerodark.msstyles`, or `aerolite.msstyles`. | **automatic** |
+| OrbDirectory | REG_SZ | Either the orb images directory to use under `explorer7\orbs`, or a `.orb` PE file containing bitmap resources. Directory values are relative to the installation directory. For example, `"blue"` loads from `explorer7\orbs\blue\`, `"colors\green"` loads from `explorer7\orbs\colors\green\`, `"Windows 7.orb"` loads `explorer7\Windows 7.orb`, and a full path like `C:\Themes\Windows 7.orb` is also supported. If this is not specified, explorer7 first looks for `explorer7\orbs\aero.orb` and uses it when present; otherwise the internal explorer image is used. | **default** |
 | DisableComposition | REG_DWORD | When set to 1, explorer7 will act as if the Desktop Window Manager is not running. | **0** |
 | ClassicTheme | REG_DWORD | When set to 1, explorer7 will use the Windows Classic theme. | **0** |
-| EnableImmersive | REG_DWORD | Controls the ability to run immersive applications in the system. When set to 0, immersive applications will not be able to run. | **0** |
+| EnableImmersive | REG_DWORD | Controls the ability to run immersive applications in the system. When set to 0, immersive applications will not be able to run. | **1** |
 | StoreAppsInStart | REG_DWORD | When set to 0, immersive applications will be hidden from the All Programs list. | **1** |
 | StoreAppsOnTaskbar | REG_DWORD | When set to 0, specializations applied to load immersive application icons will not be applied, and pinned immersive applications will be hidden. | **0 (when EnableImmersive = 0)**, **1 (when EnableImmersive = 1)** |
-| ColorizationOptions | REG_DWORD | Controls shell colorization behaviour. Options 1 to 4 may have varying compatibility across Windows versions. | **1** |
+| ColorizationOptions | REG_DWORD | Controls shell colorization behaviour. Options 1 to 4 may have varying compatibility across Windows versions. | **0** |
 | AcrylicColorization | REG_DWORD | Controls acrylic colorization behaviour. Options 0-2 control the use of immersive colours, option 3 will use the regular colorization. | **0** |
 | OverrideAlpha | REG_DWORD | When set to 1, colorization alpha specified by DWM is overridden on the taskbar, start menu, and thumbnails. | **0** |
 | AlphaValue | REG_DWORD | For use alongside OverrideAlpha, to specify a 2-digit hex code for the colorization system to use. | **0x6B** |
@@ -164,34 +134,23 @@ These options are located under `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\Cu
 
 ## Theme support
 
-explorer7 allows any theme from Windows Vista to Windows 8.0 to be used for the start menu and taskbar. If applicable, you **must** include the "en-US" folder that comes along with your .msstyles file, otherwise the theme won't be applied. Themes from Windows 8.1 and later do work, but will not have the proper classes for the start menu, an issue which cannot currently be resolved.
-
-<details>
-  <summary>Here are valid file structures for the theme folder:</summary>
-
-`Theme` registry key set to `theme1`
-```
-explorer7/
-├─ theme/
-│  ├─ en-US/
-│  ├─ theme1.msstyles
-```
-
-`Theme` registry key set to `Themefolder\theme1`
-```
-explorer7/
-├─ theme/
-│  ├─ Themefolder/
-│  │  ├─ en-US/
-│  │  ├─ theme1.msstyles
+explorer7 loads the inactive taskbar/start menu theme from the `Theme` folder next to `explorer.exe`, falling back to the legacy singular `Theme` folder if that is what the package contains. By default it automatically picks the file that matches the active Windows theme, and caches the last detected file in `ThemeCache` so startup can reuse it if Windows has not exposed the active theme yet:
 
 ```
-  
-</details>
+explorer.exe folder/
+├─ Theme/        (preferred)
+│  ├─ aero.msstyles
+│  ├─ aerodark.msstyles
+│  ├─ aerolite.msstyles
+```
+
+If `Theme` is set under `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced`, that value overrides the automatic switch. For example, `Theme=custom` loads `Theme\custom.msstyles`, while `Theme=C:\Theme\custom.msstyles` loads that full path directly.
+
+If applicable, you **must** include the "en-US" folder that comes along with your .msstyles file, otherwise the theme won't be applied. Themes from Windows 8.1 and later do work, but will not have the proper classes for the start menu, an issue which cannot currently be resolved.
 
 ## Custom orbs
 
-As an additional feature, explorer7 lets you import your own custom orbs without having to patch your explorer.exe using Resource Hacker or using specialized programs. Due to WinGDI limitations, it only supports .bmp images. To do this, simply make a directory inside the "orbs" folder and place your images inside it with the naming scheme from the example layout below. If it finds the appropiate images, the orb system will also account for 125% and 150% DPI (HiDPI) automatically. The layout should be as it follows:
+As an additional feature, explorer7 lets you import your own custom orbs without having to patch your explorer.exe using Resource Hacker or using specialized programs. You can do this either with a directory of `.bmp` files under the `orbs` folder, or with a standalone `.orb` PE file that contains the same bitmap resources explorer.exe would normally load. Due to WinGDI limitations, the directory-based format only supports `.bmp` images. If it finds the appropriate images or resources, the orb system will also account for 125% and 150% DPI (HiDPI) automatically. The layout should be as it follows:
 
 <details>
   <summary>Valid layout for custom orbs:</summary>
@@ -236,6 +195,8 @@ explorer7/
 │  │  │  │  6812.bmp (190% DPI - 106x318 - Top-aligned taskbar image)
 
 ```
+
+You can also point `OrbDirectory` directly at a `.orb` file instead of a directory. Relative values are resolved next to `explorer.exe`, so `OrbDirectory=Windows 7.orb` will load `explorer7\Windows 7.orb`. The file should contain the orb bitmaps as PE resources using the same numeric IDs (`6801`-`6812`) that explorer.exe uses. Missing resource IDs still fall back to the internal explorer.exe orb. When `OrbDirectory` is unset, explorer7 automatically tries `explorer7\orbs\aero.orb` before falling back to the built-in orb.
   
 </details>
 
@@ -261,7 +222,6 @@ for support:
 | Version | Status |
 | ------- | ------ |
 | Windows 7 | ⏳ Work in progress |
-| Windows Vista | ❌ Not in active development |
 
 ## Minhook Linker errors
 
@@ -281,3 +241,4 @@ Original Ex7ForW8 Project: [Tihiy](https://msfn.org/board/topic/157302-windows-7
 Explorer.exe/Explorer.exe.mui/Shell32.mui are property of
 
 © 2009 Microsoft Corporation. All rights reserved.
+

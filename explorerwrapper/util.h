@@ -36,7 +36,31 @@ HMODULE GetCurrentModuleHandle() //use for internal resource calls... honestly i
 
 bool IsClassicTheme(void)
 {
-	return !IsThemeActive() || s_ClassicTheme;
+	return !IsThemeActive() || s_ClassicTheme || IsHighContrastEnabled();
+}
+
+bool IsCompositionManuallyDisabled(void)
+{
+	return s_DisableComposition || IsHighContrastEnabled();
+}
+bool ShouldDisableAeroPeek(void)
+{
+	return !IsAppThemed() || IsClassicTheme() || !IsCompositionActive() || IsCompositionManuallyDisabled();
+}
+
+bool ShouldForceExplorerFrameDwmOff(void)
+{
+	return !IsAppThemed() || IsClassicTheme() || IsCompositionManuallyDisabled();
+}
+
+bool ShouldDisableShellWindowTransparency(void)
+{
+	return !IsAppThemed() || IsClassicTheme() || IsCompositionManuallyDisabled();
+}
+
+bool ShouldApplyShellWindowAccent(void)
+{
+	return !ShouldDisableShellWindowTransparency() && IsCompositionActive() && s_ColorizationOptions != 0;
 }
 
 bool AllowThemes(void)
@@ -78,6 +102,263 @@ static HWND GetThumbnailWnd()
 		hwnd_taskthumb = FindWindow(L"TaskListThumbnailWnd", NULL);
 	return hwnd_taskthumb;
 }
+static bool IsExplorerFrameWindow(HWND hwnd)
+{
+	if (!hwnd)
+		return false;
+
+	HWND root = GetAncestor(hwnd, GA_ROOT);
+	if (!root)
+		root = hwnd;
+
+	WCHAR className[64] = {};
+	if (!GetClassNameW(root, className, ARRAYSIZE(className)))
+		return false;
+
+	return !StrCmpW(className, L"CabinetWClass") || !StrCmpW(className, L"ExploreWClass");
+}
+
+static bool ShouldTreatDwmAsDisabledForExplorerFrame(HWND hwnd)
+{
+	return ShouldForceExplorerFrameDwmOff() && IsExplorerFrameWindow(hwnd);
+}
+
+static void RefreshExplorerFrameNcArea(HWND hwnd);
+
+static bool IsCoreWrapperWindow(HWND hwnd)
+{
+	if (!hwnd)
+		return false;
+
+	HWND taskbar = GetTaskbarWnd();
+	if (taskbar && (hwnd == taskbar || IsChild(taskbar, hwnd)))
+		return true;
+
+	HWND startMenu = GetStartMenuWnd();
+	if (startMenu && (hwnd == startMenu || IsChild(startMenu, hwnd)))
+		return true;
+
+	HWND thumbnail = GetThumbnailWnd();
+	if (thumbnail && (hwnd == thumbnail || IsChild(thumbnail, hwnd)))
+		return true;
+
+	return IsExplorerFrameWindow(hwnd);
+}
+
+static bool IsShellDialogWindow(HWND hwnd)
+{
+	if (!hwnd)
+		return false;
+
+	HWND root = GetAncestor(hwnd, GA_ROOT);
+	if (!root)
+		root = hwnd;
+
+	WCHAR className[64] = {};
+	if (!GetClassNameW(root, className, ARRAYSIZE(className)))
+		return false;
+
+	bool isDialogClass = !StrCmpW(className, L"#32770") || !StrCmpW(className, L"Shell_Dialog") || !StrCmpW(className, L"Shell_Dim") || !StrCmpW(className, L"NotifyIconOverflowWindow");
+	if (!isDialogClass)
+		return false;
+
+	DWORD processId = 0;
+	GetWindowThreadProcessId(root, &processId);
+	return processId == GetCurrentProcessId();
+}
+
+static const LPCWSTR CLASSIC_DIALOG_PROP = L"Explorer7ClassicDialog";
+static const LPCWSTR THEME_SUBAPP_PROP = (LPCWSTR)0xA911;
+static const LPCWSTR THEME_SUBID_PROP = (LPCWSTR)0xA910;
+static const LPCWSTR CLASSIC_FRAME_PROP = L"Explorer7ClassicFrame";
+static const LPCWSTR CLASSIC_SUBAPP_PROP = L"Explorer7ClassicSubApp";
+static const LPCWSTR CLASSIC_SUBID_PROP = L"Explorer7ClassicSubId";
+static const LPCWSTR EXPLORER_FRAME_PREVPROC_PROP = L"Explorer7FramePrevProc";
+static LRESULT CALLBACK ExplorerFrameProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+void ClearForcedActiveWindowAppearance(HWND hwnd);
+void DisableWindowNcRendering(HWND hwnd);
+void RestoreWindowNcRendering(HWND hwnd);
+void NotifyWindowCompositionChanged(HWND wnd);
+
+static void ApplyDialogWindowTheme(HWND hwnd, LPCWSTR pszSubApp, LPCWSTR pszSubId)
+{
+	LPCWSTR themeArgs[2] = { pszSubApp, pszSubId };
+	SetWindowTheme(hwnd, pszSubApp, pszSubId);
+	EnumChildWindows(hwnd, [](HWND child, LPARAM lParam) -> BOOL
+	{
+		LPCWSTR* themeArgs = reinterpret_cast<LPCWSTR*>(lParam);
+		SetWindowTheme(child, themeArgs[0], themeArgs[1]);
+		return TRUE;
+	}, (LPARAM)themeArgs);
+}
+
+static void RefreshShellDialogVisuals(HWND hwnd)
+{
+	RefreshExplorerFrameNcArea(hwnd);
+	RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+static void SyncShellDialogTheme(HWND hwnd)
+{
+	if (!IsShellDialogWindow(hwnd))
+		return;
+
+	if (IsClassicTheme())
+	{
+		if (!GetPropW(hwnd, CLASSIC_DIALOG_PROP))
+		{
+			SetPropW(hwnd, CLASSIC_DIALOG_PROP, (HANDLE)1);
+			ClearForcedActiveWindowAppearance(hwnd);
+			ApplyDialogWindowTheme(hwnd, L"", L"");
+			RefreshShellDialogVisuals(hwnd);
+		}
+	}
+	else if (GetPropW(hwnd, CLASSIC_DIALOG_PROP))
+	{
+		RemovePropW(hwnd, CLASSIC_DIALOG_PROP);
+		ApplyDialogWindowTheme(hwnd, NULL, NULL);
+		RefreshShellDialogVisuals(hwnd);
+	}
+}
+
+static void CacheExplorerThemeAtom(HWND hwnd, LPCWSTR sourceProp, LPCWSTR cacheProp)
+{
+	ATOM atom = (ATOM)(ULONG_PTR)GetPropW(hwnd, sourceProp);
+	if (!atom || GetPropW(hwnd, cacheProp))
+		return;
+
+	WCHAR buffer[260];
+	UINT copied = GetAtomNameW(atom, buffer, ARRAYSIZE(buffer));
+	if (!copied)
+		return;
+
+	ATOM cachedAtom = AddAtomW(buffer);
+	if (cachedAtom)
+	{
+		SetPropW(hwnd, cacheProp, (HANDLE)(ULONG_PTR)cachedAtom);
+	}
+}
+
+static void ReleaseExplorerThemeAtom(HWND hwnd, LPCWSTR cacheProp)
+{
+	ATOM atom = (ATOM)(ULONG_PTR)RemovePropW(hwnd, cacheProp);
+	if (atom)
+	{
+		DeleteAtom(atom);
+	}
+}
+
+static LPCWSTR RestoreExplorerThemeString(HWND hwnd, LPCWSTR cacheProp, WCHAR(&buffer)[260])
+{
+	ATOM atom = (ATOM)(ULONG_PTR)GetPropW(hwnd, cacheProp);
+	if (!atom)
+		return NULL;
+
+	if (!GetAtomNameW(atom, buffer, ARRAYSIZE(buffer)))
+		return NULL;
+
+	return buffer;
+}
+
+static void EnsureExplorerFrameSubclass(HWND hwnd)
+{
+	if (!hwnd || !IsExplorerFrameWindow(hwnd) || GetPropW(hwnd, EXPLORER_FRAME_PREVPROC_PROP))
+		return;
+
+	WNDPROC prevProc = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+	if (!prevProc)
+		return;
+
+	SetPropW(hwnd, EXPLORER_FRAME_PREVPROC_PROP, (HANDLE)prevProc);
+	SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)ExplorerFrameProc);
+}
+
+static void RestoreExplorerFrameTheme(HWND hwnd)
+{
+	WCHAR subApp[260];
+	WCHAR subId[260];
+	LPCWSTR pszSubApp = RestoreExplorerThemeString(hwnd, CLASSIC_SUBAPP_PROP, subApp);
+	LPCWSTR pszSubId = RestoreExplorerThemeString(hwnd, CLASSIC_SUBID_PROP, subId);
+	SetWindowTheme(hwnd, pszSubApp, pszSubId);
+}
+
+static void ReleaseExplorerFrameState(HWND hwnd)
+{
+	ReleaseExplorerThemeAtom(hwnd, CLASSIC_SUBAPP_PROP);
+	ReleaseExplorerThemeAtom(hwnd, CLASSIC_SUBID_PROP);
+
+	WNDPROC prevProc = (WNDPROC)RemovePropW(hwnd, EXPLORER_FRAME_PREVPROC_PROP);
+	if (prevProc)
+	{
+		SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)prevProc);
+	}
+}
+
+static LRESULT CALLBACK ExplorerFrameProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	WNDPROC prevProc = (WNDPROC)GetPropW(hwnd, EXPLORER_FRAME_PREVPROC_PROP);
+	if (!prevProc)
+	{
+		return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+	}
+
+	if (!IsClassicTheme() && (uMsg == WM_NCACTIVATE || uMsg == WM_ACTIVATE || uMsg == WM_SETFOCUS))
+	{
+		RestoreExplorerFrameTheme(hwnd);
+	}
+
+	if (uMsg == WM_NCDESTROY)
+	{
+		LRESULT ret = CallWindowProcW(prevProc, hwnd, uMsg, wParam, lParam);
+		ReleaseExplorerFrameState(hwnd);
+		return ret;
+	}
+
+	return CallWindowProcW(prevProc, hwnd, uMsg, wParam, lParam);
+}
+
+static void RefreshExplorerFrameNcArea(HWND hwnd)
+{
+	SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOSENDCHANGING | SWP_ASYNCWINDOWPOS);
+	RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME);
+}
+
+static void SyncExplorerFrameTheme(HWND hwnd)
+{
+	if (!IsExplorerFrameWindow(hwnd))
+		return;
+
+	if (IsClassicTheme())
+	{
+		if (!GetPropW(hwnd, CLASSIC_FRAME_PROP))
+		{
+			CacheExplorerThemeAtom(hwnd, THEME_SUBAPP_PROP, CLASSIC_SUBAPP_PROP);
+			CacheExplorerThemeAtom(hwnd, THEME_SUBID_PROP, CLASSIC_SUBID_PROP);
+			EnsureExplorerFrameSubclass(hwnd);
+			SetPropW(hwnd, CLASSIC_FRAME_PROP, (HANDLE)1);
+			ClearForcedActiveWindowAppearance(hwnd);
+			SetWindowTheme(hwnd, L"", L"");
+			DisableWindowNcRendering(hwnd);
+			RefreshExplorerFrameNcArea(hwnd);
+		}
+	}
+	else if (GetPropW(hwnd, CLASSIC_FRAME_PROP))
+	{
+		RemovePropW(hwnd, CLASSIC_FRAME_PROP);
+		RestoreExplorerFrameTheme(hwnd);
+		RestoreWindowNcRendering(hwnd);
+		RefreshExplorerFrameNcArea(hwnd);
+	}
+}
+
+static bool IsWrapperManagedWindow(HWND hwnd)
+{
+	if (!hwnd)
+		return false;
+
+	return IsCoreWrapperWindow(hwnd) || IsShellDialogWindow(hwnd);
+}
 
 int g_fDPIAware = 0;
 int g_nScreenDpi = 0;
@@ -107,21 +388,6 @@ __int64 GetScreenDpi(void)
 	return (unsigned int)g_nScreenDpi;
 }
 
-// this setup is created so that SetWindowTheme can apply Windows 8-era classes without causing crashing
-extern HTHEME g_currentTheme = 0;
-
-void LoadCurrentTheme(HWND hwnd, LPCWSTR pszClassList)
-{
-	g_currentTheme = 0;
-	DWORD flags = 2;
-	if ((unsigned int)GetScreenDpi() != 96)
-		flags |= 1u;
-
-	if (g_loadedTheme)
-		g_currentTheme = OpenThemeDataFromFile(g_loadedTheme, hwnd, pszClassList, flags);
-	else
-		g_currentTheme = fOpenThemeData(hwnd, pszClassList);
-}
 
 // Ittr: Forcing this change fixes colorization on aero.msstyles for 1809+ on taskbar and start menu ONLY.
 void EnsureWindowColorization()
@@ -152,8 +418,8 @@ DWORD GetColorizationColor()
 	int g = (colors.ColorizationColor >> 8) & 0xFF;
 	int b = (colors.ColorizationColor) & 0xFF;
 
-	// thanks to microsoft we have to account for automatic colorization being bugged on 10+ as alpha is set to 0. Yay...
-	if (g_osVersion.BuildNumber() >= 10074 && s_ColorizationOptions != 3 && a == 0x00 && (r != 0x00 || g != 0x00 || b != 0x00)) // only apply if it appears that the user is trying to set an actual colour - full transparency remains possible!
+	// Automatic colorization can report alpha as 0 on Windows 10.
+	if (s_ColorizationOptions != 3 && a == 0x00 && (r != 0x00 || g != 0x00 || b != 0x00)) // only apply if it appears that the user is trying to set an actual colour - full transparency remains possible!
 	{
 		a = 0xC4; // we default to this as it's used by the majority of win10/11 default colours
 	}
@@ -221,36 +487,11 @@ ACCENT_STATE GetAccentState(bool isThumbnail)
 
 __forceinline WINDOWCOMPOSITIONATTRIBDATA GetTrayAccentProperties(bool isThumbnail)
 {
-	// to break down what happens here:
-	// - we create an accent policy
-	// - we take in whether thumbnail wnd is calling so we can make tweaks as needed
-	// - accent state gets calculated and returned based on user preference
-	// - this calculation is tweaked if thumbnail wnd flag is passed in, as pseudo-aero looks better with solid thumbnail
-	// - we then define the accent flags - start menu and taskbar work fine with 0x13, thumbnail requires 0x200 to work properly on later windows 10 versions (presumably OK on earlier vers)
-	// - 0x200 is then added to with extra to ensure that blurbehind mode takes in color properly
-	// - we then define gradient color by pulling either DWM accent color or immersive color as applicable
-	// this is then passed into attribute data which we call back into whenever we need to get accent properties without retyping this whole function
-
-	if (g_osVersion.BuildNumber() >= 21996 && s_ColorizationOptions == 3) // Acrylic colorization misbehaves on 11. Removing 0x2 flag fixes this
-	{
-		WINDOWCOMPOSITIONATTRIBDATA attrData;
-		ACCENT_POLICY accentPolicy;
-
-		accentPolicy.AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND;
-		accentPolicy.AccentFlags = (isThumbnail) ? (0x1 | 0x200) : (0x11); // very important that this is set up like this!
-		accentPolicy.GradientColor = GetColorizationColor();
-
-		attrData.Attrib = WCA_ACCENT_POLICY;
-		attrData.pvData = &accentPolicy;
-		attrData.cbData = sizeof(accentPolicy);
-		return attrData;
-	}
-
 	WINDOWCOMPOSITIONATTRIBDATA attrData;
 	ACCENT_POLICY accentPolicy;
 
 	accentPolicy.AccentState = GetAccentState(isThumbnail);
-	accentPolicy.AccentFlags = (isThumbnail) ? (0x1 | 0x2 | 0x200) : (0x13); // very important that this is set up like this!
+	accentPolicy.AccentFlags = (isThumbnail) ? (0x1 | 0x2 | 0x200) : (0x13);
 	accentPolicy.GradientColor = GetColorizationColor();
 
 	attrData.Attrib = WCA_ACCENT_POLICY;
@@ -259,7 +500,47 @@ __forceinline WINDOWCOMPOSITIONATTRIBDATA GetTrayAccentProperties(bool isThumbna
 	return attrData;
 }
 
-// Ittr: Less lines of code and more utility/reusability for setting composition attributes in future
+__forceinline WINDOWCOMPOSITIONATTRIBDATA GetDisabledTrayAccentProperties()
+{
+	WINDOWCOMPOSITIONATTRIBDATA attrData;
+	ACCENT_POLICY accentPolicy = {};
+	accentPolicy.AccentState = ACCENT_DISABLED;
+
+	attrData.Attrib = WCA_ACCENT_POLICY;
+	attrData.pvData = &accentPolicy;
+	attrData.cbData = sizeof(accentPolicy);
+	return attrData;
+}
+
+void DisableShellWindowBlur(HWND hwnd)
+{
+	if (!hwnd || !IsWindow(hwnd))
+		return;
+
+	DWM_BLURBEHIND blurBehind = {};
+	blurBehind.dwFlags = DWM_BB_ENABLE;
+	blurBehind.fEnable = FALSE;
+	DwmEnableBlurBehindWindow(hwnd, &blurBehind);
+}
+
+void UpdateShellWindowAccent(HWND hwnd, bool isThumbnail)
+{
+	if (ShouldApplyShellWindowAccent())
+	{
+		SetWindowCompositionAttribute(hwnd, &GetTrayAccentProperties(isThumbnail));
+		return;
+	}
+
+	if (!ShouldDisableShellWindowTransparency())
+	{
+		return;
+	}
+
+	SetWindowCompositionAttribute(hwnd, &GetDisabledTrayAccentProperties());
+	ClearForcedActiveWindowAppearance(hwnd);
+	DisableShellWindowBlur(hwnd);
+}
+
 void ForceActiveWindowAppearance(HWND hwnd)
 {
 	BOOL bForceActiveWindowAppearance = true;
@@ -269,15 +550,262 @@ void ForceActiveWindowAppearance(HWND hwnd)
 	attrData.cbData = sizeof(bForceActiveWindowAppearance);
 	SetWindowCompositionAttribute(hwnd, &attrData);
 }
+void ClearForcedActiveWindowAppearance(HWND hwnd)
+{
+	BOOL bForceActiveWindowAppearance = false;
+	WINDOWCOMPOSITIONATTRIBDATA attrData;
+	attrData.Attrib = WCA_FORCE_ACTIVEWINDOW_APPEARANCE;
+	attrData.pvData = &bForceActiveWindowAppearance;
+	attrData.cbData = sizeof(bForceActiveWindowAppearance);
+	SetWindowCompositionAttribute(hwnd, &attrData);
+}
+
+void DisableWindowNcRendering(HWND hwnd)
+{
+	if (!hwnd || !IsWindow(hwnd))
+		return;
+
+	const MARGINS margins = { 0 };
+	if (DwmExtendFrameIntoClientAreaOrig)
+	{
+		DwmExtendFrameIntoClientAreaOrig(hwnd, &margins);
+	}
+	else
+	{
+		static auto fn = reinterpret_cast<DwmExtendFrameIntoClientAreaAPI>(GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmExtendFrameIntoClientArea"));
+		if (fn)
+			fn(hwnd, &margins);
+	}
+	int bNCRenderingPolicy = DWMNCRP_DISABLED;
+	WINDOWCOMPOSITIONATTRIBDATA attrData;
+	attrData.Attrib = WCA_NCRENDERING_POLICY;
+	attrData.pvData = &bNCRenderingPolicy;
+	attrData.cbData = sizeof(bNCRenderingPolicy);
+	SetWindowCompositionAttribute(hwnd, &attrData);
+	DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &bNCRenderingPolicy, sizeof(bNCRenderingPolicy));
+}
+void RestoreWindowNcRendering(HWND hwnd)
+{
+	if (!hwnd || !IsWindow(hwnd))
+		return;
+
+	int bNCRenderingPolicy = DWMNCRP_USEWINDOWSTYLE;
+	WINDOWCOMPOSITIONATTRIBDATA attrData;
+	attrData.Attrib = WCA_NCRENDERING_POLICY;
+	attrData.pvData = &bNCRenderingPolicy;
+	attrData.cbData = sizeof(bNCRenderingPolicy);
+	SetWindowCompositionAttribute(hwnd, &attrData);
+	DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &bNCRenderingPolicy, sizeof(bNCRenderingPolicy));
+}
+
+void RestoreManagedWindowComposition(HWND hwnd)
+{
+	if (IsExplorerFrameWindow(hwnd) && GetPropW(hwnd, CLASSIC_FRAME_PROP))
+	{
+		SyncExplorerFrameTheme(hwnd);
+	}
+
+	RestoreWindowNcRendering(hwnd);
+	if (IsExplorerFrameWindow(hwnd))
+	{
+		SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+			SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOSENDCHANGING);
+		RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
+	}
+	PostMessage(hwnd, WM_DWMCOMPOSITIONCHANGED, 0, 0);
+}
+
+BOOL CALLBACK RestoreExplorerComposition(HWND wnd, LPARAM prm)
+{
+	UNREFERENCED_PARAMETER(prm);
+	if (IsExplorerFrameWindow(wnd))
+	{
+		RestoreManagedWindowComposition(wnd);
+	}
+	return TRUE;
+}
+
+void RestoreShellWindowComposition(HWND wnd)
+{
+	if (!wnd || !IsWindow(wnd))
+		return;
+
+	RestoreManagedWindowComposition(wnd);
+}
+
+void RestoreShellWindowsComposition(HWND excludeWnd)
+{
+	HWND taskbar = GetTaskbarWnd();
+	if (taskbar && taskbar != excludeWnd)
+	{
+		RestoreShellWindowComposition(taskbar);
+	}
+
+	HWND startMenu = GetStartMenuWnd();
+	if (startMenu && startMenu != excludeWnd)
+	{
+		RestoreShellWindowComposition(startMenu);
+	}
+
+	HWND thumbnail = GetThumbnailWnd();
+	if (thumbnail && thumbnail != excludeWnd)
+	{
+		RestoreShellWindowComposition(thumbnail);
+	}
+}
+
+void RestoreShellDialogComposition(HWND wnd)
+{
+	if (!wnd || !IsWindow(wnd) || !IsShellDialogWindow(wnd))
+		return;
+
+	SyncShellDialogTheme(wnd);
+	RestoreWindowNcRendering(wnd);
+	RefreshShellDialogVisuals(wnd);
+	NotifyWindowCompositionChanged(wnd);
+}
+
+BOOL CALLBACK RestoreShellDialogWindowsComposition(HWND wnd, LPARAM prm)
+{
+	UNREFERENCED_PARAMETER(prm);
+	RestoreShellDialogComposition(wnd);
+	return TRUE;
+}
 
 const UINT ThemeChangeMessage = WM_USER + 69420;
-BOOL CALLBACK RefreshWindows(HWND wnd, LPARAM prm)
-{
-	if (wnd == (HWND)prm) return TRUE;
 
+void RefreshWindowTheme(HWND wnd)
+{
 	PostMessage(wnd, WM_THEMECHANGED, 0, 0);
 	dbgprintf(L"themechanged sent to %i", wnd);
+}
+void RefreshWindowThemeChildren(HWND wnd)
+{
+	if (!wnd || !IsWindow(wnd))
+		return;
+
+	EnumChildWindows(wnd, [](HWND child, LPARAM) -> BOOL
+	{
+		RedrawWindow(child, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+		return TRUE;
+	}, 0);
+
+	RedrawWindow(wnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+void NotifyWindowCompositionChanged(HWND wnd)
+{
+	PostMessage(wnd, WM_DWMCOMPOSITIONCHANGED, 0, 0);
+}
+
+void RefreshExplorerFrameTheme(HWND wnd)
+{
+	if (!wnd || !IsWindow(wnd) || !IsExplorerFrameWindow(wnd))
+		return;
+
+	SyncExplorerFrameTheme(wnd);
+	RefreshWindowTheme(wnd);
+}
+
+BOOL CALLBACK RefreshExplorerFrameWindows(HWND wnd, LPARAM prm)
+{
+	UNREFERENCED_PARAMETER(prm);
+	RefreshExplorerFrameTheme(wnd);
 	return TRUE;
+}
+
+void RefreshShellDialogTheme(HWND wnd)
+{
+	if (!wnd || !IsWindow(wnd) || !IsShellDialogWindow(wnd))
+		return;
+
+	SyncShellDialogTheme(wnd);
+	RefreshWindowTheme(wnd);
+}
+
+BOOL CALLBACK RefreshShellDialogWindows(HWND wnd, LPARAM prm)
+{
+	UNREFERENCED_PARAMETER(prm);
+	RefreshShellDialogTheme(wnd);
+	return TRUE;
+}
+
+BOOL CALLBACK NotifyShellDialogCompositionChanged(HWND wnd, LPARAM prm)
+{
+	UNREFERENCED_PARAMETER(prm);
+	if (IsShellDialogWindow(wnd))
+	{
+		NotifyWindowCompositionChanged(wnd);
+	}
+	return TRUE;
+}
+
+BOOL CALLBACK NotifyExplorerCompositionChanged(HWND wnd, LPARAM prm)
+{
+	UNREFERENCED_PARAMETER(prm);
+	if (IsExplorerFrameWindow(wnd))
+	{
+		NotifyWindowCompositionChanged(wnd);
+	}
+	return TRUE;
+}
+
+void RefreshShellWindow(HWND wnd)
+{
+	if (!wnd || !IsWindow(wnd))
+		return;
+
+	RefreshWindowTheme(wnd);
+}
+
+void NotifyShellCompositionChanged(HWND wnd)
+{
+	if (!wnd || !IsWindow(wnd))
+		return;
+
+	NotifyWindowCompositionChanged(wnd);
+}
+
+void RefreshShellWindows(HWND excludeWnd)
+{
+	HWND taskbar = GetTaskbarWnd();
+	if (taskbar && taskbar != excludeWnd)
+	{
+		RefreshShellWindow(taskbar);
+	}
+
+	HWND startMenu = GetStartMenuWnd();
+	if (startMenu && startMenu != excludeWnd)
+	{
+		RefreshShellWindow(startMenu);
+	}
+
+	HWND thumbnail = GetThumbnailWnd();
+	if (thumbnail && thumbnail != excludeWnd)
+	{
+		RefreshShellWindow(thumbnail);
+	}
+}
+
+void NotifyShellWindowsCompositionChanged(HWND excludeWnd)
+{
+	HWND taskbar = GetTaskbarWnd();
+	if (taskbar && taskbar != excludeWnd)
+	{
+		NotifyShellCompositionChanged(taskbar);
+	}
+
+	HWND startMenu = GetStartMenuWnd();
+	if (startMenu && startMenu != excludeWnd)
+	{
+		NotifyShellCompositionChanged(startMenu);
+	}
+
+	HWND thumbnail = GetThumbnailWnd();
+	if (thumbnail && thumbnail != excludeWnd)
+	{
+		NotifyShellCompositionChanged(thumbnail);
+	}
 }
 
 BOOL WINAPI GetWindowBandNew(HWND hwnd, DWORD* out);
@@ -355,15 +883,9 @@ bool IsWindowNotDesktopOrTray(HWND hwnd)
 	if (!IsWindow(hwnd) || !IsValidDesktopZOrderBand(hwnd, TRUE) || hwnd == hwnd_taskbar || (v_hwndDesktop && hwnd == *v_hwndDesktop))
 		return false;
 
-	//if (GetClassWord(hwnd, GCW_ATOM) == g_SecondaryTaskbarAtom)
-	//	return g_SecondaryTaskbarAtom == 0;
-
 	return true;
 }
 
-//removes immersive background windows
-//(Microsoft Text Input Host, Shell Experience Host, etc.)
-// this is defined here rather than in AddressImports.h so that utility ShouldAddWindowToTray can work properly
 BOOL WINAPI IsWindowVisibleNEW(HWND hWnd)
 {
 	if (!IsWindowVisible(hWnd) || !IsValidDesktopZOrderBand(hWnd, TRUE))
@@ -374,17 +896,23 @@ BOOL WINAPI IsWindowVisibleNEW(HWND hWnd)
 	if (bCloaked)
 		return FALSE;
 
+	if ((ShouldForceExplorerFrameDwmOff() || GetPropW(hWnd, CLASSIC_FRAME_PROP)) && IsExplorerFrameWindow(hWnd))
+	{
+		SyncExplorerFrameTheme(hWnd);
+	}
+	else if (IsShellDialogWindow(hWnd))
+	{
+		SyncShellDialogTheme(hWnd);
+	}
+
 	if (IsShellFrameWindow && GhostWindowFromHungWindow)
 	{
 		if (IsShellFrameWindow(hWnd) && !GhostWindowFromHungWindow(hWnd))
 			return TRUE;
 	}
 
-	//if (IsShellManagedWindow)
-	{
-		if (IsShellManagedWindow(hWnd) && GetPropW(hWnd, L"Microsoft.Windows.ShellManagedWindowAsNormalWindow") == NULL)
-			return FALSE;
-	}
+	if (IsShellManagedWindow(hWnd) && GetPropW(hWnd, L"Microsoft.Windows.ShellManagedWindowAsNormalWindow") == NULL)
+		return FALSE;
 
 	return TRUE;
 }
@@ -394,15 +922,6 @@ __int64 ShouldAddWindowToTray(HWND hwnd)
 	BOOL ret = IsWindowNotDesktopOrTray(hwnd) && IsWindowVisibleNEW(hwnd) && ShouldAddWindowToTrayHelper(hwnd);
 	//dbgprintf(L"ShouldAddWindowToTray %i", (int)ret);
 	return ret;
-}
-
-// Generic crash error
-void CrashError()
-{
-	WCHAR errorText[71] = L"An unexpected error occurred and explorer7 needs to quit. We're sorry!"; // Funny brick game message go haha
-	WCHAR errorTitle[16] = L"explorer7 Crash";
-
-	MessageBoxW(NULL, errorText, errorTitle, MB_ICONERROR); // the actual error box lol
 }
 
 // Create all programs shellfolder on 1607+ where it doesn't already exist
@@ -427,19 +946,15 @@ void CreateShellFolder()
 	}
 }
 
-// Compatibility warning for Windows 11 24H2+
-void FirstRunCompatibilityWarning()
+
+// Warn and exit on unsupported OS builds
+void UnsupportedBuildWarningAndExit()
 {
-	if (g_osVersion.BuildNumber() >= 26100 || g_osVersion.BuildNumber() == 20348) // temporary one-off M2 warning for Win11 24H2 users, permanent for iron users
+	ULONG build = g_osVersion.BuildNumber();
+	if (build < 9999 || build > 20000)
 	{
-		DWORD value = 0;
-		RegGetDWORD(HKEY_CURRENT_USER, c_szSubkey, L"FirstRunVersionCheck", &value);
-		if (value != 1)
-		{
-			MessageBoxW(NULL, L"This build of Windows is not currently supported.\n\nYou may encounter usability issues.", L"explorer7", MB_ICONEXCLAMATION);
-			DWORD newValue = 1;
-			RegSetDWORD(HKEY_CURRENT_USER, c_szSubkey, L"FirstRunVersionCheck", &newValue);
-		}
+		MessageBoxW(NULL, L"This build of Windows is not supported.", L"explorer7", MB_ICONEXCLAMATION);
+		ExitProcess(0);
 	}
 }
 
@@ -483,7 +998,7 @@ HWND WINAPI CreateWindowInBandNew(DWORD dwExStyle,
 		BOOL excludeFromPeek = true;
 		WCHAR className[MAX_PATH];
 		GetClassName(ret, className, ARRAYSIZE(className));
-		if (lstrcmp(className, L"Windows.UI.Core.CoreWindow") == 0 || lstrcmp(className, L"Shell_Dialog") == 0 || lstrcmp(className, L"Shell_Dim") == 0)
+		if (lstrcmp(className, L"Windows.UI.Core.CoreWindow") == 0 || lstrcmp(className, L"Shell_Dialog") == 0 || lstrcmp(className, L"Shell_Dim") == 0 || lstrcmp(className, L"NotifyIconOverflowWindow") == 0)
 		{
 			SetWindowPos(ret, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOREPOSITION);
 		}
@@ -528,7 +1043,7 @@ HWND WINAPI CreateWindowInBandExNew(DWORD exStyle, LPWSTR szClassName, PVOID p3,
 	BOOL excludeFromPeek = true;
 	WCHAR className[MAX_PATH];
 	GetClassName(ret, className, ARRAYSIZE(className));
-	if (lstrcmp(className, L"Windows.UI.Core.CoreWindow") == 0 || lstrcmp(className, L"Shell_Dialog") == 0 || lstrcmp(className, L"Shell_Dim") == 0)
+	if (lstrcmp(className, L"Windows.UI.Core.CoreWindow") == 0 || lstrcmp(className, L"Shell_Dialog") == 0 || lstrcmp(className, L"Shell_Dim") == 0 || lstrcmp(className, L"NotifyIconOverflowWindow") == 0)
 	{
 		SetWindowPos(ret, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOREPOSITION);
 	}
@@ -556,7 +1071,7 @@ BOOL WINAPI SetWindowBandNew(HWND hwnd, HWND hwndInsertAfter, DWORD flags)
 	BOOL excludeFromPeek = true;
 	WCHAR className[MAX_PATH];
 	GetClassName(hwnd, className, ARRAYSIZE(className));
-	if (lstrcmp(className, L"Windows.UI.Core.CoreWindow") == 0 || lstrcmp(className, L"Shell_Dialog") == 0 || lstrcmp(className, L"Shell_Dim") == 0)
+	if (lstrcmp(className, L"Windows.UI.Core.CoreWindow") == 0 || lstrcmp(className, L"Shell_Dialog") == 0 || lstrcmp(className, L"Shell_Dim") == 0 || lstrcmp(className, L"NotifyIconOverflowWindow") == 0)
 	{
 		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOREPOSITION);
 	}

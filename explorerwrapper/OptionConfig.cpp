@@ -1,9 +1,9 @@
 #include "OptionConfig.h"
+#include "ThemeManager.h"
 
 // Ittr: Migrated all configuration here to make things clearer in dllmain
 
 // Individual option definitions
-// - To create a new definition, you must define it here and in OptionConfig.h
 bool s_ClassicTheme;
 bool s_DisableComposition;
 int s_EnableImmersiveShellStack;
@@ -16,6 +16,21 @@ bool s_OverrideAlpha;
 DWORD s_AlphaValue;
 bool s_UseDCompFlyouts;
 
+static bool s_ClassicThemeSetting;
+static bool s_DisableCompositionSetting;
+
+void RefreshThemeConfiguration()
+{
+	bool forceClassicTheme = s_ClassicThemeSetting || !IsThemeActive() || IsHighContrastEnabled();
+
+	s_DisableComposition = s_DisableCompositionSetting || forceClassicTheme;
+	s_ClassicTheme = forceClassicTheme;
+	if (forceClassicTheme)
+	{
+		dbgprintf(L"Disabling themes...");
+	}
+}
+
 // This is called at the beginning of the library's execution
 // The format for each setting is generally:
 // - DWORD init with default value
@@ -26,16 +41,9 @@ bool s_UseDCompFlyouts;
 void InitializeConfiguration()
 {
 	// Immersive shell stack for modern apps (e.g. PC settings)
-	// - Defaults to disabled (0)
-	// - Pending stability improvements before default enablement
-	DWORD dwEnableUWP = 0;
-	if (g_osVersion.BuildNumber() >= 10074 && g_osVersion.BuildNumber() < 27686) // Note: Immersive is currently buggy in 27686 and later
-	{
-		// Immersive shell can only be enabled on TH1 onwards
-		// Consolidate the check to here so we don't have to do double comparisons elsewhere in the software
-		// In other words, this is more efficient
-		g_registry.QueryValue(L"EnableImmersive", (LPBYTE)&dwEnableUWP, sizeof(DWORD));
-	}
+	// - Defaults to enabled (1)
+	DWORD dwEnableUWP = 1;
+	g_registry.QueryValue(L"EnableImmersive", (LPBYTE)&dwEnableUWP, sizeof(DWORD));
 #ifndef PRERELEASE_COPY
 	if (dwEnableUWP == 2) // mode 2 is for debugging only, not release builds!
 	{
@@ -71,63 +79,29 @@ void InitializeConfiguration()
 	// - Defaults to disabled (0)
 	DWORD dwDisableComposition = 0;
 	g_registry.QueryValue(L"DisableComposition", (LPBYTE)&dwDisableComposition, sizeof(DWORD));
-	s_DisableComposition = (dwDisableComposition != 0);
+	s_DisableCompositionSetting = (dwDisableComposition != 0);
 
 	// Disable themes (e.g. aero.msstyles)
 	// - Defaults to disabled (0)
 	DWORD dwClassicTheme = 0;
 	g_registry.QueryValue(L"ClassicTheme", (LPBYTE)&dwClassicTheme, sizeof(DWORD));
-	if (dwClassicTheme != 0)
-	{
-		// What we do here:
-		// 1) A debug string is outputted
-		// 2) We indicate we want to disable composition first
-		// 3) Then, indicate we want to disable theming
-		// 4) Actually disable themes by setting the theme properties of explorer to NULL
-		dbgprintf(L"Disabling themes...");
-		s_DisableComposition = true;
-		s_ClassicTheme = true;
-		SetThemeAppProperties(NULL);
-	}
+	s_ClassicThemeSetting = (dwClassicTheme != 0);
+	RefreshThemeConfiguration();
 
 	// Colorization configuration
-	// - Check first if the user is using a Windows version with buggy colorization (in which case, Acrylic is enforced)
-	// - Otherwise, we use composited colorization option set...
-	if (g_osVersion.BuildNumber() >= 27858 && g_osVersion.BuildNumber() < 27891)
+	// - Defaults to regular (0)
+	DWORD dwColorizationOptions = 0;
+	g_registry.QueryValue(L"ColorizationOptions", (LPBYTE)&dwColorizationOptions, sizeof(DWORD));
+	if (dwColorizationOptions < 6)
 	{
-		// Note: Non-acrylic effects are broken in some recent Canary builds, so prevent usage
-		s_ColorizationOptions = 3;
-	}
-	else
-	{
-		// Composited colorization options
-		// - In this case we default to Translucent (1)
-		// - This is because it is the only mode that works on every supported OS
-		DWORD dwColorizationOptions = 1;
-		g_registry.QueryValue(L"ColorizationOptions", (LPBYTE)&dwColorizationOptions, sizeof(DWORD));
-		if (dwColorizationOptions != 0 && dwColorizationOptions < 6)
+		// Acrylic is not supported by Win32 API until RS4, so falls back to Translucent.
+		if (dwColorizationOptions == 3 && g_osVersion.BuildNumber() < 17134)
 		{
-			// Some notes on the selection statement:
-			// - BlurBehind is broken from Nickel onwards, Acrylic is used instead as an alternative blur
-			// - Acrylic is not supported by Win32 API until RS4, so falls back to Translucent
-			// - BlurBehind, Acrylic, SolidColor are unsupported on 8.x, so falls back to Translucent
-			// - Otherwise, we apply the inputted value as the mode is supported on the OS
-			if (dwColorizationOptions == 2 && g_osVersion.BuildNumber() >= 22621)
-			{
-				s_ColorizationOptions = 3;
-			}
-			else if (dwColorizationOptions == 3 && g_osVersion.BuildNumber() < 17134)
-			{
-				s_ColorizationOptions = 1;
-			}
-			else if (dwColorizationOptions >= 2 && g_osVersion.BuildNumber() < 10074)
-			{
-				s_ColorizationOptions = 1;
-			}
-			else
-			{
-				s_ColorizationOptions = dwColorizationOptions;
-			}
+			s_ColorizationOptions = 1;
+		}
+		else
+		{
+			s_ColorizationOptions = dwColorizationOptions;
 		}
 	}
 

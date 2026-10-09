@@ -39,23 +39,44 @@
 #include "MinhookImports.h"
 #include "TypeDefinitions.h"
 
+static LRESULT ReloadInactiveThemeForTaskbar(HWND hwnd, WPARAM wParam, LPARAM lParam)
+{
+	bool wasCompositionSuppressed = IsClassicTheme() || IsCompositionManuallyDisabled();
+
+	RefreshThemeConfiguration();
+	g_dwStartMenuThemeThreadId = 0;
+	ThemeManagerInitialize();
+	bool isCompositionSuppressed = IsClassicTheme() || IsCompositionManuallyDisabled();
+	EnumWindows(RefreshExplorerFrameWindows, 0);
+	EnumWindows(RefreshShellDialogWindows, 0);
+	RefreshShellWindows(hwnd);
+
+	if (wasCompositionSuppressed && !isCompositionSuppressed)
+	{
+		EnumWindows(RestoreExplorerComposition, 0);
+		EnumWindows(RestoreShellDialogWindowsComposition, 0);
+		RestoreShellWindowComposition(hwnd);
+		RestoreShellWindowsComposition(hwnd);
+	}
+
+	if (wasCompositionSuppressed != isCompositionSuppressed)
+	{
+		EnumWindows(NotifyExplorerCompositionChanged, 0);
+		EnumWindows(NotifyShellDialogCompositionChanged, 0);
+		NotifyShellCompositionChanged(hwnd);
+		NotifyShellWindowsCompositionChanged(hwnd);
+	}
+	LRESULT result = CallWindowProc(g_prevTrayProc, hwnd, WM_THEMECHANGED, wParam, lParam);
+	RefreshWindowThemeChildren(hwnd);
+	return result;
+}
+
 LRESULT CALLBACK NewTrayProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	if (uMsg == 0x56D) return 0;
 	if (uMsg == ThemeChangeMessage) //reinit thememanager on themechanged, so that inactive msstyles is updated
 	{
-		for (int i = 0; i < themeHandles->size; ++i)
-		{
-			CloseThemeData(themeHandles->data[i]);
-		}
-		realloc(themeHandles->data, 0);
-		themeHandles->size = 0;
-
-		ThemeManagerInitialize();
-		EnumWindows(RefreshWindows, (LPARAM)hwnd);
-
-		uMsg = WM_THEMECHANGED;
-		return CallWindowProc(g_prevTrayProc, hwnd, uMsg, wParam, lParam);
+		return ReloadInactiveThemeForTaskbar(hwnd, wParam, lParam);
 	}
 
 	if (uMsg == WM_DISPLAYCHANGE || uMsg == WM_WINDOWPOSCHANGED)
@@ -77,14 +98,14 @@ LRESULT CALLBACK NewTrayProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 	if (uMsg == WM_THEMECHANGED)
 	{
-		EnsureWindowColorization(); // Ittr: Correct colorization enablement setting for Win10/11
+		return ReloadInactiveThemeForTaskbar(hwnd, wParam, lParam);
 	}
 
 	if (uMsg == WM_SETTINGCHANGE || uMsg == WM_ERASEBKGND || uMsg == WM_WININICHANGE) // Ittr: Fix taskbar colorization for non-legacy
 	{
-		if ((IsThemeActive() && !s_ClassicTheme && IsCompositionActive() && !s_DisableComposition) && hwnd == GetTaskbarWnd() && s_ColorizationOptions != 0) // Ittr: Only taskbar needs updating now, start menu and new thumbnail algo correct for themselves
+		if (hwnd == GetTaskbarWnd())
 		{
-			SetWindowCompositionAttribute(hwnd, &GetTrayAccentProperties(false));
+			UpdateShellWindowAccent(hwnd, false);
 		}
 	}
 
@@ -96,9 +117,9 @@ LRESULT CALLBACK NewThumbnailProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 {
 	if (uMsg == WM_SETTINGCHANGE || uMsg == WM_ERASEBKGND || uMsg == WM_WININICHANGE) // Ittr: Fix thumbnail colorization for non-legacy
 	{
-		if ((IsThemeActive() && !s_ClassicTheme && IsCompositionActive() && !s_DisableComposition) && (g_osVersion.BuildNumber() >= 10074 && hwnd == GetThumbnailWnd()) && s_ColorizationOptions != 0) // Ittr: Only taskbar needs updating now, start menu and new thumbnail algo correct for themselves
+		if (hwnd == GetThumbnailWnd())
 		{
-			SetWindowCompositionAttribute(hwnd, &GetTrayAccentProperties(true));
+			UpdateShellWindowAccent(hwnd, true);
 		}
 	}
 
@@ -226,6 +247,46 @@ void GetOrbDPIAndPos(LPWSTR fName)
 	}
 }
 
+static HMODULE GetCustomOrbResourceModule(LPCWSTR szExeDir, LPCWSTR szOrbPath)
+{
+	static HMODULE s_hOrbModule = NULL;
+	static WCHAR s_szOrbModulePath[MAX_PATH * 3] = {};
+
+	WCHAR szResolvedOrbPath[MAX_PATH * 3] = {};
+	if (PathIsRelativeW(szOrbPath))
+	{
+		wsprintfW(szResolvedOrbPath, L"%s\\%s", szExeDir, szOrbPath);
+	}
+	else
+	{
+		StringCchCopyW(szResolvedOrbPath, ARRAYSIZE(szResolvedOrbPath), szOrbPath);
+	}
+
+	if (FileExists(szResolvedOrbPath) == FALSE)
+		return NULL;
+
+	if (s_hOrbModule && lstrcmpiW(s_szOrbModulePath, szResolvedOrbPath) == 0)
+		return s_hOrbModule;
+
+	if (s_hOrbModule)
+	{
+		FreeLibrary(s_hOrbModule);
+		s_hOrbModule = NULL;
+	}
+
+	s_hOrbModule = LoadLibraryExW(szResolvedOrbPath, NULL, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+	if (s_hOrbModule)
+	{
+		StringCchCopyW(s_szOrbModulePath, ARRAYSIZE(s_szOrbModulePath), szResolvedOrbPath);
+	}
+	else
+	{
+		s_szOrbModulePath[0] = L'\0';
+	}
+
+	return s_hOrbModule;
+}
+
 HANDLE __stdcall LoadImageW_CallHook(HINSTANCE hInst, LPCWSTR name, UINT type, int cx, int cy, UINT fuLoad)
 {
 	dbgprintf(L"LoadImageW_CallHook has been called!");
@@ -236,11 +297,25 @@ HANDLE __stdcall LoadImageW_CallHook(HINSTANCE hInst, LPCWSTR name, UINT type, i
 	if (*backslash == L'\\')
 		*backslash = L'\0';
 
-	WCHAR szOrbDir[MAX_PATH];
+	WCHAR szOrbDir[MAX_PATH] = {};
 	LSTATUS res = g_registry.QueryValue(L"OrbDirectory", (LPBYTE)szOrbDir, sizeof(szOrbDir));
+	if (ERROR_SUCCESS != res || !*szOrbDir)
+	{
+		StringCchCopyW(szOrbDir, ARRAYSIZE(szOrbDir), L"orbs\\aero.orb");
+	}
 
-	if (!*szOrbDir || ERROR_SUCCESS != res)
+	if (lstrcmpiW(PathFindExtensionW(szOrbDir), L".orb") == 0)
+	{
+		HMODULE hOrbModule = GetCustomOrbResourceModule(szExeDir, szOrbDir);
+		if (hOrbModule)
+		{
+			HANDLE hOrbImage = LoadImageW(hOrbModule, name, type, cx, cy, fuLoad);
+			if (hOrbImage)
+				return hOrbImage;
+		}
+
 		return LoadImageW(hInst, name, type, cx, cy, fuLoad);
+	}
 
 	WCHAR szOrbFile[MAX_PATH];
 	GetOrbDPIAndPos(szOrbFile);
@@ -300,16 +375,6 @@ void ModifyDesktopHwnd()
 void HookShell32();
 void HookAPIs() // largely a legacy function now
 {
-	// 24H2+ - W32PTP
-	if (g_osVersion.BuildNumber() >= 26100)
-	{
-		HMODULE twinui_pcshell = LoadLibrary(L"twinui.pcshell.dll");
-
-		if (twinui_pcshell)
-		{
-			CTaskbandPin_CreateInstance = (CTaskbandPin_CreateInstance_t)FindPattern((uintptr_t)twinui_pcshell, "40 53 48 83 EC 20 48 8B D9 48 8D 15 ?? ?? ?? ?? B9 80 00 00 00 E8 ?? ?? ?? ?? 48 85 C0");
-		}
-	}
 
 	// Change and fix core desktop components
 	hEvent_DesktopVisible = CreateEvent(NULL, TRUE, FALSE, L"ShellDesktopVisibleEvent");
@@ -323,6 +388,7 @@ void HookAPIs() // largely a legacy function now
 
 	// We run the Minhook patches here
 	ChangeMinhookImports();
+	PatchAdvapi32();
 
 	// Prevent theme overrides applying to file explorer *VERY IMPORTANT*
 	HookTrayThread();
@@ -377,7 +443,7 @@ void HookImmersive()
 	ChangeImportedAddress(immersiveui, "user32.dll", GetUserObjectInformation, GetUserObjectInformationNew);
 	ChangeImportedAddress(immersiveui, "user32.dll", SetTimer, SetTimer_WUI);
 
-	if (!s_EnableImmersiveShellStack || g_osVersion.BuildNumber() < 10074) // Ittr: If user *either* has UWP disabled, or they are NOT on Windows 10, run legacy window band code
+	if (!s_EnableImmersiveShellStack) // Ittr: If user *either* has UWP disabled, or they are NOT on Windows 10, run legacy window band code
 	{
 		//bugbug!!!
 		ChangeImportedAddress(GetModuleHandle(L"twinui.dll"), "user32.dll", CreateWindowInBandOrig, CreateWindowInBandNew);
@@ -403,112 +469,22 @@ void PatchShunimpl()
 	}
 }
 
-// Where we need to close explorer silently (such as to block people from using awful, horrendous software...)
-void ExitExplorerSilently()
-{
-	// we do these blocks of code like this, so that the 0xc0000142 error doesn't appear
-	LPDWORD exitCode;
-	GetExitCodeProcess(L"explorer.exe", exitCode); // compiler warning is wrong here - the variable is supplied the exit code by this function
-	ExitProcess((UINT)exitCode); // exit explorer
-}
-
-// Initialize the inactive theme engine
-void ThemeHandlesInit()
-{
-	themeHandles = new wiktorArray<HTHEME>();
-	themeHandles->data = 0;
-	themeHandles->size = 0;
-}
-
-// Terminate inactive theme engine when needed
-void EndThemeHandles()
-{
-	realloc(themeHandles->data, 0);
-	themeHandles->size = 0;
-	delete themeHandles;
-}
-
-// WINDOWS 11
-void InitPinnedListHack()
-{
-	// == CPINNEDLIST HACK ==
-
-	HMODULE twinui_pcshell = LoadLibrary(L"twinui.pcshell.dll");
-
-	// CTaskbandPin_CreateInstance
-	if (twinui_pcshell)
-	{
-		// Method 1: Direct function preamble (dangerous; breaks if they modify the fields of CTaskbandPin or its superclass(es))
-		// 40 53 48 83 EC 20 48 8B D9 48 8D 15 ?? ?? ?? ?? B9 80 00 00 00 E8 ?? ?? ?? ?? 48 85 C0
-		/*matchCTaskbandPinCreateInstance = (PBYTE)FindPattern(
-			pFile,
-			dwSize,
-			"\x40\x53\x48\x83\xEC\x20\x48\x8B\xD9\x48\x8D\x15\x00\x00\x00\x00\xB9\x80\x00\x00\x00\xE8\x00\x00\x00\x00\x48\x85\xC0",
-			"xxxxxxxxxxxx????xxxxxx????xxx",
-			&numMatchesCTaskbandPinCreateInstance
-		);*/
-
-		// Method 2: winrt::Windows::Internal::Shell::implementation::PinManager::IsItemPinned
-		// 48 8D 4C 24 ?? E8 ?? ?? ?? ?? 48 83 64 24 ?? ?? 48 8D 4C 24 ?? E8 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? 85 C0
-		//                                                                   ^^^^^^^^^^^
-		PBYTE matchCTaskbandPinCreateInstance = (PBYTE)FindPattern((uintptr_t)twinui_pcshell, "48 8D 4C 24 ?? E8 ?? ?? ?? ?? 48 83 64 24 ?? ?? 48 8D 4C 24 ?? E8 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? 85 C0");
-
-		if (matchCTaskbandPinCreateInstance)
-		{
-			matchCTaskbandPinCreateInstance += 21;
-			matchCTaskbandPinCreateInstance += 5 + *(int*)(matchCTaskbandPinCreateInstance + 1);
-		}
-
-		if (!matchCTaskbandPinCreateInstance)
-		{
-			// wil::out_param() destructor inlined
-			// 0F 1F 44 00 00 48 83 64 24 ?? ?? 48 8D 4C 24 ?? E8 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? 85 C0
-			//                                                    ^^^^^^^^^^^
-			matchCTaskbandPinCreateInstance = (PBYTE)FindPattern((uintptr_t)twinui_pcshell, "0F 1F 44 00 00 48 83 64 24 ?? ?? 48 8D 4C 24 ?? E8 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? 85 C0");
-
-			if (matchCTaskbandPinCreateInstance)
-			{
-				matchCTaskbandPinCreateInstance += 16;
-				matchCTaskbandPinCreateInstance += 5 + *(int*)(matchCTaskbandPinCreateInstance + 1);
-			}
-		}
-
-		if (matchCTaskbandPinCreateInstance)
-		{
-			CTaskbandPin_CreateInstance = (CTaskbandPin_CreateInstance_t)matchCTaskbandPinCreateInstance;
-		}
-	}
-}
-
 BOOL APIENTRY DllMain(HMODULE hModule,
 	DWORD  ul_reason_for_call,
 	LPVOID lpReserved)
 {
-	// Ittr: We initialise values for closing program if incompatible software is present
-	WCHAR programPath[MAX_PATH] = L"\\Stardock\\WindowBlinds 11\\unins000.exe";
-	WCHAR blacklistPath[MAX_PATH];
-	ExpandEnvironmentStringsW(L"%ProgramFiles%", (LPWSTR)blacklistPath, sizeof(blacklistPath));
-	lstrcat(blacklistPath, programPath);
 
 	switch (ul_reason_for_call)
 	{
 	case DLL_PROCESS_ATTACH:
 	{
+		UnsupportedBuildWarningAndExit();
+
 		PatchShunimpl();
 
-		if (GetFileAttributesW((LPCWSTR)blacklistPath) != INVALID_FILE_ATTRIBUTES) // Windowblinds blockage part 1 - create user-facing error
-			CrashError(); // The user-facing crash message - we do these blocks of code like this, so that the 0xc0000142 error doesn't appear
-
-		/*if (g_osVersion.BuildNumber() >= 26100)
-		{
-			InitPinnedListHack();
-		}*/
-
 		CreateShellFolder(); // Fix shell folder for 1607+...
-		EnsureWindowColorization(); // Correct colorization enablement setting for Win10/11
-		FirstRunCompatibilityWarning(); // Warn users on Windows 11 24H2+ and Server 2022 of potential problems
+		EnsureWindowColorization(); // Correct colorization enablement setting for Windows 10
 		FirstRunPrereleaseWarning(); // Warn users if this is a pre-release build that this is the case on first run ONLY
-		ThemeHandlesInit(); // Basically start the inactive theme management process
 
 		dbgprintf(L"Dll Attach\n");
 
@@ -542,15 +518,12 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 			g_alttabhooked = TRUE;
 		}
 
-		if (GetFileAttributes((LPCWSTR)blacklistPath) != INVALID_FILE_ATTRIBUTES) // Windowblinds blockage part 2 - actually stops the program from running
-			ExitExplorerSilently(); //byebye WB users
-
 	}
 	break;
 	case DLL_THREAD_DETACH:
 		break;
 	case DLL_PROCESS_DETACH:
-		EndThemeHandles();
+		ThemeManagerUninitialize();
 		break;
 	}
 	return TRUE;
@@ -567,7 +540,7 @@ extern "C" HRESULT WINAPI Explorer_CoCreateInstance(
 	HRESULT result;
 	result = CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv);
 
-	if (rclsid == CLSID_PersonalStartMenu && riid == IID_IShellItemFilter && result != S_OK && g_osVersion.BuildNumber() >= 10074) //Ittr: as far as im aware doesnt cause crashing on 1507/11. needs further checking when im awake
+	if (rclsid == CLSID_PersonalStartMenu && riid == IID_IShellItemFilter && result != S_OK) //Ittr: as far as im aware doesnt cause crashing on 1507/11. needs further checking when im awake
 	{
 		auto shellItemFilter = new CStartMenuItemFilter();
 		result = shellItemFilter->QueryInterface(riid, ppv);
@@ -656,22 +629,7 @@ extern "C" HRESULT WINAPI Explorer_CoCreateInstance(
 			id = IID_IPinnedList3;
 		}
 
-		//if (rclsid == CLSID_TaskbarPin && CTaskbandPin_CreateInstance && build >= 26100) // Windows 11...
-		//{
-		//	CTaskbandPin_W32PTP* pTaskbandPin;
-		//	result = CTaskbandPin_CreateInstance(&pTaskbandPin);
-		//	dbgprintf(L"CTaskbandPin_CreateInstance result: %p", result);
-		//	if (SUCCEEDED(result))
-		//	{
-		//		result = ((IUnknown*)pTaskbandPin)->QueryInterface(id, ppv);
-		//		dbgprintf(L"CTaskbandPin_CreateInstance result 2: %p", result);
-		//		((IUnknown*)pTaskbandPin)->Release();
-		//	}
-		//}
-		//else
-		{
-			result = CoCreateInstance(rclsid, pUnkOuter, dwClsContext, id, ppv);
-		}
+		result = CoCreateInstance(rclsid, pUnkOuter, dwClsContext, id, ppv);
 
 		if (SUCCEEDED(result))
 		{
@@ -712,23 +670,18 @@ extern "C" HRESULT WINAPI Explorer_CoCreateInstance(
 	if (rclsid == CLSID_AuthUIShutdownChoices && result != S_OK) //wrap authui
 	{
 		dbgprintf(L"wrap authui\n");
-		int build = g_osVersion.BuildNumber();
 		if (*ppv)
 		{
 			dbgprintf(L"good\n");
-			*ppv = new CAuthUIWrapper((IUnknown*)*ppv, build);
+			*ppv = new CAuthUIWrapper((IUnknown*)*ppv);
 		}
 		else
 		{
-			IID dk = IID_IShutdownChoices8;
-			if (build >= 10074)
-				dk = IID_IShutdownChoices10;
-
-			result = CoCreateInstance(rclsid, pUnkOuter, dwClsContext, dk, ppv);
+			result = CoCreateInstance(rclsid, pUnkOuter, dwClsContext, IID_IShutdownChoices10, ppv);
 			if (*ppv)
 			{
 				dbgprintf(L"good 2\n");
-				*ppv = new CAuthUIWrapper((IUnknown*)*ppv, build);
+				*ppv = new CAuthUIWrapper((IUnknown*)*ppv);
 			}
 		}
 	}
@@ -749,7 +702,7 @@ extern "C" HRESULT WINAPI Explorer_CoRegisterClassObject(
 	if (rclsid == CLSID_TrayNotify)
 	{
 		pUnk = new CTrayNotifyFactory((IClassFactory*)pUnk);
-		if (g_osVersion.BuildNumber() < 10074 || s_EnableImmersiveShellStack == 2) // Ittr: gate fakeimmersive to 8.1 due to functional issues (e.g. hanging) with 10 - restoring this on 10 is now seemingly unnecessary
+		if (s_EnableImmersiveShellStack == 2) // Ittr: gate fakeimmersive to 8.1 due to functional issues (e.g. hanging) with 10 - restoring this on 10 is now seemingly unnecessary
 		{
 			//register immersive shell fake too
 			RegisterFakeImmersive();
@@ -770,7 +723,7 @@ extern "C" HRESULT WINAPI Explorer_CoRevokeClassObject(DWORD dwRegister)
 {
 	if (dwRegister == dwRegisterNotify)
 	{
-		if (g_osVersion.BuildNumber() < 10074 || s_EnableImmersiveShellStack == 2) // Ittr: gate fakeimmersive to 8.1 due to functional issues (e.g. hanging) with 10
+		if (s_EnableImmersiveShellStack == 2) // Ittr: gate fakeimmersive to 8.1 due to functional issues (e.g. hanging) with 10
 		{
 			UnregisterFakeImmersive();
 			UnregisterProjection();

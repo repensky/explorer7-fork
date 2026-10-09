@@ -6,6 +6,10 @@
 #include "OSVersion.h"
 #include "TypeDefinitions.h"
 
+
+#ifndef DWM_E_COMPOSITIONDISABLED
+#define DWM_E_COMPOSITIONDISABLED 0x80263001
+#endif
 // Ittr: Address import patches are now in this file
 
 // Adjust ShellURL so that searching by file extension is functional again
@@ -65,16 +69,61 @@ BOOL WINAPI CalculatePopupWindowPositionNEW(
 	RECT* popupWindowPosition
 )
 {
+	UINT popupFlags = flags;
+	if (!IsAppThemed())
+	{
+		popupFlags &= ~TPM_WORKAREA;
+	}
 	BOOL res = CalculatePopupWindowPosition(
-		anchorPoint, windowSize, flags,
+		anchorPoint, windowSize, popupFlags,
 		excludeRect, popupWindowPosition
 	);
-	if ((IsThemeActive() && !s_ClassicTheme && IsCompositionActive() && !s_DisableComposition) && res && (flags & TPM_WORKAREA) != 0)
+	if (IsAppThemed() && (!IsClassicTheme() && IsCompositionActive() && !IsCompositionManuallyDisabled()) && res && (flags & TPM_WORKAREA) != 0)
 	{
 		SIZE adjust = AdjustWindowRectForTaskbar(popupWindowPosition);
 		OffsetRect(popupWindowPosition, adjust.cx, adjust.cy);
 	}
 	return res;
+}
+
+BOOL WINAPI TrackPopupMenuExNEW(
+	HMENU hMenu,
+	UINT uFlags,
+	int x,
+	int y,
+	HWND hwnd,
+	LPTPMPARAMS lptpm
+)
+{
+	HWND taskbar = GetTaskbarWnd();
+	if (!IsAppThemed() && taskbar && hwnd && (hwnd == taskbar || IsChild(taskbar, hwnd)))
+	{
+		APPBARDATA abd = { sizeof(APPBARDATA) };
+		abd.hWnd = taskbar;
+		if (SHAppBarMessage(ABM_GETTASKBARPOS, &abd))
+		{
+			HDC screen = GetDC(NULL);
+			int offset = MulDiv(4, GetDeviceCaps(screen, LOGPIXELSY), 96);
+			ReleaseDC(NULL, screen);
+			switch (abd.uEdge)
+			{
+			case ABE_LEFT:
+				x -= offset;
+				break;
+			case ABE_TOP:
+				y -= offset;
+				break;
+			case ABE_RIGHT:
+				x += offset;
+				break;
+			case ABE_BOTTOM:
+				y += offset;
+				break;
+			}
+		}
+	}
+
+	return TrackPopupMenuEx(hMenu, uFlags, x, y, hwnd, lptpm);
 }
 
 // Additional helper for removing immersive menus. Better inter-operability between Windows versions. Used alongside the pattern method.
@@ -92,9 +141,7 @@ BOOL SystemParametersInfoWNEW(UINT uiAction, UINT uiParam, PVOID pvParam, UINT f
 // For SWCA, so we can import our colorization configuration
 BOOL WINAPI SetWindowCompositionAttributeNEW(HWND hwnd, WINDOWCOMPOSITIONATTRIBDATA* pAttrData) // Ittr: re-organised again 25/10/24
 {
-	dbgprintf(L"SetWindowCompositionAttribute %X %x %d", hwnd, pAttrData->Attrib, *(DWORD*)pAttrData->pvData);
-
-	if (!IsThemeActive() || s_ClassicTheme || !IsCompositionActive() || s_DisableComposition) // we do funny things so explorer works properly for classic/basic.
+	if ((IsClassicTheme() || !IsCompositionActive() || IsCompositionManuallyDisabled()) && IsWrapperManagedWindow(hwnd)) // we do funny things so explorer works properly for classic/basic.
 	{
 		int bNCRenderingEnabled = DWMNCRP_DISABLED;
 
@@ -107,14 +154,17 @@ BOOL WINAPI SetWindowCompositionAttributeNEW(HWND hwnd, WINDOWCOMPOSITIONATTRIBD
 		return SetWindowCompositionAttribute(hwnd, &attrData); //byebye
 	}
 
-	if ((IsThemeActive() && !s_ClassicTheme && IsCompositionActive() && !s_DisableComposition) && pAttrData->Attrib == WCA_DISALLOW_PEEK) // if user has DWM enabled, and is not using basic/classic
+	if (pAttrData->Attrib == WCA_DISALLOW_PEEK)
 	{
-		if (s_ColorizationOptions != 0 && (hwnd == GetTaskbarWnd() || hwnd == GetStartMenuWnd() || (g_osVersion.BuildNumber() >= 10074 && hwnd == GetThumbnailWnd()))) // for pseudo-aero, blurbehind, acrylic & solid modes
+		if (hwnd == GetTaskbarWnd() || hwnd == GetStartMenuWnd() || hwnd == GetThumbnailWnd())
 		{
-			SetWindowCompositionAttribute(hwnd, &GetTrayAccentProperties((hwnd == GetThumbnailWnd()) ? true : false));
+			UpdateShellWindowAccent(hwnd, hwnd == GetThumbnailWnd());
 		}
 
-		ForceActiveWindowAppearance(hwnd); // mainly for legacy but doesn't seem to harm anything by applying anyway
+		if (!ShouldDisableShellWindowTransparency() && IsCompositionActive())
+		{
+			ForceActiveWindowAppearance(hwnd); // mainly for legacy but doesn't seem to harm anything by applying anyway
+		}
 	}
 
 	return SetWindowCompositionAttribute(hwnd, pAttrData);
@@ -142,52 +192,74 @@ UINT WINAPI SetErrorModeNEW(UINT uMode)
 
 	return SetErrorMode(uMode);
 }
-
 //Ittr: Intercept these functions where appropriate for basic theme to be forced at compile time if required
 BOOL WINAPI IsCompositionActiveNEW()
 {
-	if (s_DisableComposition) { return FALSE; }
-
 	return IsCompositionActive();
-}
-
-// Apply relevant Win8-era theme classes if they're defined
-HRESULT WINAPI SetWindowThemeNEW(HWND hwnd, LPCWSTR pszSubAppName, LPCWSTR pszSubIdList)
-{
-	if (IsThemeClassDefined(g_currentTheme, L"ShowDesktop8", L"Button", 0))
-	{
-		if (lstrcmp(pszSubAppName, L"VerticalShowDesktop") == 0)
-		{
-			return SetWindowTheme(hwnd, L"VerticalShowDesktop8", pszSubIdList);
-		}
-
-		if (lstrcmp(pszSubAppName, L"ShowDesktop") == 0)
-		{
-			return SetWindowTheme(hwnd, L"ShowDesktop8", pszSubIdList);
-		}
-	}
-
-	// We don't check here because, unlike ShowDesktop::Button, there is no inherited fallback class
-	// In other words, it already falls back to the 7-era class if required
-	if (hwnd == GetThumbnailWnd() && (lstrcmp(pszSubAppName, L"Vertical") != 0) && IsCompositionActiveNEW()) // updated thumbnail classes misbehave without DWM
-	{
-		return SetWindowTheme(hwnd, L"W8", pszSubIdList);
-	}
-
-	if (hwnd == GetThumbnailWnd() && (lstrcmp(pszSubAppName, L"Vertical") == 0) && IsCompositionActiveNEW())
-	{
-		return SetWindowTheme(hwnd, L"W8Vertical", pszSubIdList);
-	}
-
-	return SetWindowTheme(hwnd, pszSubAppName, pszSubIdList);
 }
 
 // Disable composition where appropriate
 HRESULT WINAPI DwmIsCompositionEnabledNEW(BOOL* pfEnabled)
 {
-	if (s_DisableComposition) { return DWM_E_COMPOSITIONDISABLED; } //0x80263001 is the value to signify composition being disabled for some reason
+	HRESULT hr;
+	if (DwmIsCompositionEnabledOrig)
+	{
+		hr = DwmIsCompositionEnabledOrig(pfEnabled);
+	}
+	else
+	{
+		static auto fn = reinterpret_cast<DwmIsCompositionEnabledAPI>(GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmIsCompositionEnabled"));
+		hr = fn ? fn(pfEnabled) : E_FAIL;
+	}
 
-	return DwmIsCompositionEnabled(pfEnabled);
+	if (SUCCEEDED(hr) && pfEnabled && *pfEnabled && IsCompositionManuallyDisabled())
+	{
+		*pfEnabled = FALSE;
+	}
+
+	return hr;
+}
+HRESULT WINAPI DwmExtendFrameIntoClientAreaNEW(HWND hwnd, const MARGINS* pMarInset)
+{
+	if (ShouldTreatDwmAsDisabledForExplorerFrame(hwnd))
+	{
+		if (!GetPropW(hwnd, CLASSIC_FRAME_PROP))
+		{
+			SyncExplorerFrameTheme(hwnd);
+		}
+		return DWM_E_COMPOSITIONDISABLED;
+	}
+
+	if (DwmExtendFrameIntoClientAreaOrig)
+	{
+		return DwmExtendFrameIntoClientAreaOrig(hwnd, pMarInset);
+	}
+
+	static auto fn = reinterpret_cast<DwmExtendFrameIntoClientAreaAPI>(GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmExtendFrameIntoClientArea"));
+	return fn ? fn(hwnd, pMarInset) : E_FAIL;
+}
+
+HRESULT WINAPI DwmSetWindowAttributeNEW(HWND hwnd, DWORD dwAttribute, LPCVOID pvAttribute, DWORD cbAttribute)
+{
+	int bNCRenderingPolicy = DWMNCRP_DISABLED;
+	if (dwAttribute == DWMWA_NCRENDERING_POLICY &&
+		ShouldTreatDwmAsDisabledForExplorerFrame(hwnd))
+	{
+		if (!GetPropW(hwnd, CLASSIC_FRAME_PROP))
+		{
+			SyncExplorerFrameTheme(hwnd);
+		}
+		pvAttribute = &bNCRenderingPolicy;
+		cbAttribute = sizeof(bNCRenderingPolicy);
+	}
+
+	if (DwmSetWindowAttributeOrig)
+	{
+		return DwmSetWindowAttributeOrig(hwnd, dwAttribute, pvAttribute, cbAttribute);
+	}
+
+	static auto fn = reinterpret_cast<DwmSetWindowAttributeAPI>(GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmSetWindowAttribute"));
+	return fn ? fn(hwnd, dwAttribute, pvAttribute, cbAttribute) : E_FAIL;
 }
 
 // Disable legacy DwmEnableBlurBehindWindow when new methods are in use
@@ -198,7 +270,8 @@ HRESULT WINAPI DwmEnableBlurBehindWindowNEW(HWND hwnd, DWM_BLURBEHIND* pBlurBehi
 		ForceActiveWindowAppearance(hwnd);
 	}
 
-	if ((hwnd == GetTaskbarWnd() || hwnd == GetStartMenuWnd() || (g_osVersion.BuildNumber() >= 10074 && hwnd == GetThumbnailWnd())) && s_ColorizationOptions != 0) //enable rtm pseudo-aero
+	if ((hwnd == GetTaskbarWnd() || hwnd == GetStartMenuWnd() || hwnd == GetThumbnailWnd()) &&
+		(pBlurBehind && (s_ColorizationOptions != 0 || ShouldDisableShellWindowTransparency())))
 	{
 		pBlurBehind->fEnable = 0;
 	}
@@ -214,9 +287,17 @@ __int64 DwmpActivateLivePreviewNEW(int a1, __int64 a2, __int64 a3, int a4, void*
 		a5 = 0;
 	}
 
-	if (a5 && IsBadReadPtr(a5, 0x8))
+	if (a5)
 	{
-		a5 = 0;
+		MEMORY_BASIC_INFORMATION mbi;
+		if (!VirtualQuery(a5, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+		{
+			a5 = 0;
+		}
+	}
+	if (ShouldDisableAeroPeek() && a1)
+	{
+		return 0;
 	}
 
 	return DwmpActivateLivePreview(a1, a2, a3, a4, a5);
@@ -234,23 +315,241 @@ DWORD WINAPI DwmGetColorizationParametersNEW(PDWMCOLORIZATIONPARAMS colors)
 	return ret;
 }
 
-// Prevent additional hotkey double-registration on Windows 11
-static BOOL WINAPI ShellRegisterHotKeyNEW(HWND hwnd, int a2, UINT key1, UINT key2, HWND target)
+
+struct StartupRunKey
 {
-	// Windows key
-	if (key1 == MOD_WIN && key2 == 0)
-	{
-		return FALSE;
-	}
+	HKEY hKey;
+	HKEY hRoot;
+};
 
-	// Ctrl+Esc combination
-	if (key1 == MOD_CONTROL && key2 == VK_ESCAPE)
-	{
-		return FALSE;
-	}
+StartupRunKey g_startupRunKeys[8] = {};
+SRWLOCK g_startupRunKeysLock = SRWLOCK_INIT;
 
-	return ShellRegisterHotKey(hwnd, a2, key1, key2, target);
+bool IsStartupRunKey(PCWSTR subKey)
+{
+	static const WCHAR runKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+	return subKey && lstrcmpiW(subKey, runKey) == 0;
 }
+
+void TrackStartupRunKey(HKEY hKey, HKEY hRoot)
+{
+	AcquireSRWLockExclusive(&g_startupRunKeysLock);
+	for (StartupRunKey& key : g_startupRunKeys)
+	{
+		if (!key.hKey)
+		{
+			key = { hKey, hRoot };
+			break;
+		}
+	}
+	ReleaseSRWLockExclusive(&g_startupRunKeysLock);
+}
+
+HKEY GetStartupRunKeyRoot(HKEY hKey)
+{
+	HKEY hRoot = NULL;
+	AcquireSRWLockShared(&g_startupRunKeysLock);
+	for (const StartupRunKey& key : g_startupRunKeys)
+	{
+		if (key.hKey == hKey)
+		{
+			hRoot = key.hRoot;
+			break;
+		}
+	}
+	ReleaseSRWLockShared(&g_startupRunKeysLock);
+	return hRoot;
+}
+
+void UntrackStartupRunKey(HKEY hKey)
+{
+	AcquireSRWLockExclusive(&g_startupRunKeysLock);
+	for (StartupRunKey& key : g_startupRunKeys)
+	{
+		if (key.hKey == hKey)
+		{
+			key = {};
+			break;
+		}
+	}
+	ReleaseSRWLockExclusive(&g_startupRunKeysLock);
+}
+
+bool IsStartupItemEnabled(HKEY hRoot, PCWSTR approvalKey, PCWSTR valueName)
+{
+	DWORD state[3] = {};
+	DWORD stateSize = sizeof(state);
+	LSTATUS status = RegGetValueW(
+		hRoot, approvalKey, valueName, RRF_RT_REG_BINARY, NULL, state, &stateSize);
+
+	// Modern Explorer treats a missing/invalid record as enabled. For a valid
+	// record, even states (2 and 6) are enabled and odd states (3 and 7) are blocked.
+	return status != ERROR_SUCCESS || !stateSize || (state[0] & 1) == 0;
+}
+
+decltype(&RegOpenKeyExW) RegOpenKeyExWOrig;
+decltype(&RegEnumValueW) RegEnumValueWOrig;
+decltype(&RegCloseKey) RegCloseKeyOrig;
+
+
+LSTATUS WINAPI RegOpenKeyExWNEW(HKEY hKey, LPCWSTR subKey, DWORD options, REGSAM samDesired, PHKEY result)
+{
+	LSTATUS status = RegOpenKeyExWOrig(hKey, subKey, options, samDesired, result);
+	if (status == ERROR_SUCCESS && IsStartupRunKey(subKey))
+		TrackStartupRunKey(*result, hKey);
+	return status;
+}
+
+LSTATUS WINAPI RegCloseKeyNEW(HKEY hKey)
+{
+	UntrackStartupRunKey(hKey);
+	return RegCloseKeyOrig(hKey);
+}
+
+LSTATUS WINAPI RegEnumValueWNEW(
+	HKEY hKey,
+	DWORD index,
+	LPWSTR valueName,
+	LPDWORD valueNameSize,
+	LPDWORD reserved,
+	LPDWORD type,
+	LPBYTE data,
+	LPDWORD dataSize)
+{
+	HKEY hRoot = GetStartupRunKeyRoot(hKey);
+	if (!hRoot)
+		return RegEnumValueWOrig(hKey, index, valueName, valueNameSize, reserved, type, data, dataSize);
+
+	DWORD enabledIndex = 0;
+	for (DWORD physicalIndex = 0; ; ++physicalIndex)
+	{
+		WCHAR candidate[16384];
+		DWORD candidateSize = ARRAYSIZE(candidate);
+		LSTATUS status = RegEnumValueWOrig(hKey, physicalIndex, candidate, &candidateSize, NULL, NULL, NULL, NULL);
+		if (status != ERROR_SUCCESS)
+			return status;
+
+		static const WCHAR approvalKey[] =
+			L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+		if (IsStartupItemEnabled(hRoot, approvalKey, candidate) && enabledIndex++ == index)
+			return RegEnumValueWOrig(hKey, physicalIndex, valueName, valueNameSize, reserved, type, data, dataSize);
+	}
+}
+
+DWORD ProcessRun6432NEW()
+{
+	static const WCHAR runKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+	static const WCHAR approvalKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run32";
+	HKEY hKey;
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, runKey, 0, KEY_READ | KEY_WOW64_32KEY, &hKey) != ERROR_SUCCESS)
+		return 0;
+
+	bool launched = false;
+	for (DWORD index = 0; ; ++index)
+	{
+		WCHAR valueName[256];
+		WCHAR command[32768];
+		DWORD valueNameSize = ARRAYSIZE(valueName);
+		DWORD commandSize = sizeof(command);
+		DWORD type;
+		LSTATUS status = RegEnumValueW(
+			hKey, index, valueName, &valueNameSize, NULL, &type,
+			reinterpret_cast<LPBYTE>(command), &commandSize);
+		if (status == ERROR_NO_MORE_ITEMS)
+			break;
+		if (status != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) ||
+			!IsStartupItemEnabled(HKEY_LOCAL_MACHINE, approvalKey, valueName))
+		{
+			continue;
+		}
+
+		WCHAR expandedCommand[32768];
+		PWSTR commandLine = command;
+		if (type == REG_EXPAND_SZ)
+		{
+			DWORD expandedSize = ExpandEnvironmentStringsW(command, expandedCommand, ARRAYSIZE(expandedCommand));
+			if (!expandedSize || expandedSize > ARRAYSIZE(expandedCommand))
+				continue;
+			commandLine = expandedCommand;
+		}
+
+		STARTUPINFOW startupInfo = { sizeof(startupInfo) };
+		PROCESS_INFORMATION processInfo;
+		if (CreateProcessW(NULL, commandLine, NULL, NULL, FALSE, 0, NULL, NULL, &startupInfo, &processInfo))
+		{
+			CloseHandle(processInfo.hThread);
+			CloseHandle(processInfo.hProcess);
+			launched = true;
+		}
+	}
+
+	RegCloseKey(hKey);
+	return launched;
+}
+
+typedef int(*ExecStartupEnumProc_t)(IShellFolder*, PCUITEMID_CHILD, IServiceProvider*, UINT, int*);
+ExecStartupEnumProc_t ExecStartupEnumProcOrig;
+
+int ExecStartupEnumProcNEW(
+	IShellFolder* folder,
+	PCUITEMID_CHILD item,
+	IServiceProvider* serviceProvider,
+	UINT startupFolder,
+	int* result)
+{
+	STRRET displayName;
+	WCHAR valueName[MAX_PATH];
+	if (SUCCEEDED(folder->GetDisplayNameOf(
+		item, static_cast<SHGDNF>(SHGDN_INFOLDER | SHGDN_FORPARSING), &displayName)) &&
+		SUCCEEDED(StrRetToBufW(&displayName, item, valueName, ARRAYSIZE(valueName))))
+	{
+		static const WCHAR approvalKey[] =
+			L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\StartupFolder";
+		HKEY approvalRoot = startupFolder == CSIDL_COMMON_STARTUP
+			? HKEY_LOCAL_MACHINE
+			: HKEY_CURRENT_USER;
+		if (!IsStartupItemEnabled(approvalRoot, approvalKey, valueName))
+			return TRUE;
+	}
+
+	return ExecStartupEnumProcOrig(folder, item, serviceProvider, startupFolder, result);
+}
+
+void PatchStartupFolder()
+{
+	char* execStartupEnumProc =
+		"48 89 5C 24 ?? 55 56 57 41 54 41 55 48 81 EC 80 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 ?? ?? ?? ?? 48 8B 01";
+	void* target = reinterpret_cast<void*>(FindPattern(reinterpret_cast<uintptr_t>(GetModuleHandle(NULL)), execStartupEnumProc));
+	if (target)
+		MH_CreateHook(target, ExecStartupEnumProcNEW, reinterpret_cast<void**>(&ExecStartupEnumProcOrig));
+}
+
+
+void PatchProcessRun6432()
+{
+	char* processRun6432 = "FF F3 48 81 EC 80 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 ?? ?? ?? ?? B9 46 00 00 40";
+	void* target = reinterpret_cast<void*>(FindPattern(reinterpret_cast<uintptr_t>(GetModuleHandle(NULL)), processRun6432));
+	if (target)
+		MH_CreateHook(target, ProcessRun6432NEW, NULL);
+}
+
+
+void PatchAdvapi32()
+{
+	HMODULE advapi32 = GetModuleHandle(L"advapi32.dll");
+	MH_CreateHook(
+		GetProcAddress(advapi32, "RegOpenKeyExW"), RegOpenKeyExWNEW,
+		reinterpret_cast<void**>(&RegOpenKeyExWOrig));
+	MH_CreateHook(
+		GetProcAddress(advapi32, "RegEnumValueW"), RegEnumValueWNEW,
+		reinterpret_cast<void**>(&RegEnumValueWOrig));
+	MH_CreateHook(
+		GetProcAddress(advapi32, "RegCloseKey"), RegCloseKeyNEW,
+		reinterpret_cast<void**>(&RegCloseKeyOrig));
+	PatchProcessRun6432();
+	PatchStartupFolder();
+}
+
 
 // Import address changes for shell32.dll modulename
 void PatchShell32()
@@ -262,18 +561,23 @@ void PatchShell32()
 // Import address changes for user32.dll modulename
 void PatchUser32()
 {
-	if (g_osVersion.BuildNumber() >= 10074)
+	// Update popup positioning to account for OS changes in Windows 10.
+	// Explorer uses CalculatePopupWindowPosition directly, while shell32 also owns popup menu placement for shell surfaces such as jumplists.
+	FARPROC calculatePopupWindowPosition = GetProcAddress(GetModuleHandle(L"user32.dll"), "CalculatePopupWindowPosition");
+	FARPROC trackPopupMenuEx = GetProcAddress(GetModuleHandle(L"user32.dll"), "TrackPopupMenuEx");
+	ChangeImportedAddress(GetModuleHandle(NULL), "user32.dll", calculatePopupWindowPosition, CalculatePopupWindowPositionNEW);
+	HMODULE shell32 = GetModuleHandle(L"shell32.dll");
+	if (shell32)
 	{
-		// Update overflow positioning to account for OS changes if the user is using TH1 or higher
-		ChangeImportedAddress(GetModuleHandle(NULL), "user32.dll", GetProcAddress(GetModuleHandle(L"user32.dll"), (LPSTR)"CalculatePopupWindowPosition"), CalculatePopupWindowPositionNEW);
+		ChangeImportedAddress(shell32, "user32.dll", calculatePopupWindowPosition, CalculatePopupWindowPositionNEW);
+		ChangeImportedAddress(shell32, "user32.dll", trackPopupMenuEx, TrackPopupMenuExNEW);
+	}
 
-		// Ensure as much as we can that immersive menus are gone, if the pattern code isn't enough, e.g. Win11 Cobalt.
-		// Only applied to shell32, as application to ExplorerFrame breaks the program list hover behaviour.
-		HMODULE shell32 = GetModuleHandle(L"shell32.dll");
-		if (shell32)
-		{
-			ChangeImportedAddress(shell32, "user32.dll", SystemParametersInfoW, SystemParametersInfoWNEW);
-		}
+	// Ensure as much as we can that immersive menus are gone, if the pattern code isn't enough.
+	// Only applied to shell32, as application to ExplorerFrame breaks the program list hover behaviour.
+	if (shell32)
+	{
+		ChangeImportedAddress(shell32, "user32.dll", SystemParametersInfoW, SystemParametersInfoWNEW);
 	}
 
 	// Load functions needed for task enumeration hook
@@ -300,13 +604,10 @@ void PatchKernel32()
 // Import address changes for uxtheme.dll modulename
 void PatchUxTheme()
 {
-	IsThemeClassDefined = (IsThemeClassDefined_t)GetProcAddress(GetModuleHandle(L"uxtheme.dll"), (LPSTR)0x32);
 
 	// Disable DWM composition as quickly as we can (if registry key set)
 	ChangeImportedAddress(GetModuleHandle(NULL), "uxtheme.dll", IsCompositionActive, IsCompositionActiveNEW);
 
-	// Change show desktop button for Windows 8-based themes
-	ChangeImportedAddress(GetModuleHandle(NULL), "uxtheme.dll", SetWindowTheme, SetWindowThemeNEW);
 }
 
 // Import address changes for dwmapi.dll modulename
@@ -315,8 +616,10 @@ void PatchDwmApi()
 	// Declare this type so we can use it elsewhere
 	DwmpUpdateAccentBlurRect = (DwmpUpdateAccentBlurRect_t)GetProcAddress(GetModuleHandle(L"dwmapi.dll"), (LPSTR)159);
 
-	// Force DwmIsCompositionEnabled calls to account for DisableComposition option
+	// Force explorer windows to see DWM as off while classic/high contrast/non-themed mode is active
 	ChangeImportedAddress(GetModuleHandle(NULL), "dwmapi.dll", DwmIsCompositionEnabled, DwmIsCompositionEnabledNEW);
+	ChangeImportedAddress(GetModuleHandle(NULL), "dwmapi.dll", DwmExtendFrameIntoClientArea, DwmExtendFrameIntoClientAreaNEW);
+	ChangeImportedAddress(GetModuleHandle(NULL), "dwmapi.dll", DwmSetWindowAttribute, DwmSetWindowAttributeNEW);
 
 	// Adjust DwmEnableBlurBehindWindow behaviour as necessary
 	ChangeImportedAddress(GetModuleHandle(NULL), "dwmapi.dll", DwmEnableBlurBehindWindow, DwmEnableBlurBehindWindowNEW);
@@ -328,14 +631,6 @@ void PatchDwmApi()
 	ChangeImportedAddress(GetModuleHandle(NULL), "dwmapi.dll", DwmGetColorizationParametersOrig, DwmGetColorizationParametersNEW);
 }
 
-void PatchTwinUI()
-{
-	// Declare the type so we can use it in our rewritten function...
-	ShellRegisterHotKey = (ShellRegisterHotKey_t)GetProcAddress(GetModuleHandle(L"user32.dll"), (LPSTR)2671);
-
-	// Prevent additional hotkey double-registration on Windows 11
-	ChangeImportedAddress(GetModuleHandle(L"twinui.dll"), "user32.dll", ShellRegisterHotKey, ShellRegisterHotKeyNEW);
-}
 
 // Consolidate all of the above so they can be changed at runtime as needed
 void ChangeAddressImports()
@@ -345,5 +640,4 @@ void ChangeAddressImports()
 	PatchKernel32();
 	PatchUxTheme();
 	PatchDwmApi();
-	PatchTwinUI();
 }

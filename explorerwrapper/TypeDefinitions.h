@@ -55,14 +55,6 @@ static  setIconThumb_t SetIconThumb;
 typedef VOID(WINAPI* CPniMainDlg_ShowFlyout_t)(HWND* hwnd, char a2);
 static CPniMainDlg_ShowFlyout_t CPniMainDlg_ShowFlyout;
 
-//typedef VOID(WINAPI* CTaskbandPin_CreateInstance_t)(PVOID);
-//static CTaskbandPin_CreateInstance_t CTaskbandPin_CreateInstance;
-
-class CTaskbandPin_W32PTP;
-typedef HRESULT(*CTaskbandPin_CreateInstance_t)(CTaskbandPin_W32PTP**);
-static CTaskbandPin_CreateInstance_t CTaskbandPin_CreateInstance;
-
-wiktorArray<HTHEME>* themeHandles;
 
 // 7 {4376df10-a662-420b-b30d-958881461ef9}
 // 8 {7A5FCA8A-76B1-44C8-A97C-E7173CCA5F4F}
@@ -133,6 +125,12 @@ struct WINDOWCOMPOSITIONATTRIBDATA
 typedef BOOL(WINAPI* SetWindowCompositionAttributeAPI) (HWND hwnd, WINDOWCOMPOSITIONATTRIBDATA* pAttrData);
 static SetWindowCompositionAttributeAPI SetWindowCompositionAttribute;
 
+typedef HRESULT(WINAPI* DwmIsCompositionEnabledAPI)(BOOL* pfEnabled);
+static DwmIsCompositionEnabledAPI DwmIsCompositionEnabledOrig;
+typedef HRESULT(WINAPI* DwmExtendFrameIntoClientAreaAPI)(HWND hwnd, const MARGINS* pMarInset);
+static DwmExtendFrameIntoClientAreaAPI DwmExtendFrameIntoClientAreaOrig;
+typedef HRESULT(WINAPI* DwmSetWindowAttributeAPI)(HWND hwnd, DWORD dwAttribute, LPCVOID pvAttribute, DWORD cbAttribute);
+static DwmSetWindowAttributeAPI DwmSetWindowAttributeOrig;
 typedef HRESULT(WINAPI* DwmpUpdateAccentBlurRect_t)(HWND, LPRECT);
 static DwmpUpdateAccentBlurRect_t DwmpUpdateAccentBlurRect;
 
@@ -337,13 +335,9 @@ typedef BOOL(*IsShellManagedWindow_t)(HWND hwnd); // 2574
 HTHEME(__stdcall* fOpenThemeData)(HWND hwnd, LPCWSTR pszClassList);
 HTHEME(__stdcall* fOpenThemeDataForDpi)(HWND hwnd, LPCWSTR pszClassList, UINT dpi);
 HTHEME(__stdcall* fOpenThemeDataEx)(HWND hwnd, LPCWSTR pszClassList, DWORD dwFlags);
+HTHEME(__fastcall* fOpenNcThemeData)(HWND hwnd, LPCWSTR pszClassList);
 
-typedef int(*IsThemeClassDefined_t)(HTHEME hTheme, LPCWSTR pszAppName, LPCWSTR pszClassId, int fAllowInheritance);
-IsThemeClassDefined_t IsThemeClassDefined;
 
 LPTHREAD_START_ROUTINE CTray__SyncThreadProc_orig = nullptr;
 
-// prevent windows 11 hotkey registration
-typedef BOOL(WINAPI* ShellRegisterHotKey_t)(HWND, int, UINT, UINT, HWND);
-static ShellRegisterHotKey_t ShellRegisterHotKey;
 
