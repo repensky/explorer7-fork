@@ -9,6 +9,15 @@ DEFINE_GUID(CLSID_StartMenuPin,0xA2A9545D, 0xA0C2, 0x42B4, 0x97,0x08,0xA0,0xB2,0
 DEFINE_GUID(CLSID_TaskbarPin,0x90AA3A4E, 0x1CBA, 0x4233, 0xB8,0xBB,0x53,0x57,0x73,0xD4,0x84,0x49);
 #pragma endregion
 
+// Our own Win7 wording, in wrapper.rc and in Explorer\<locale>\shell32.dll.mui
+#define IDS_PIN_TO_START_MENU		5381
+#define IDS_UNPIN_FROM_START_MENU	5382
+
+// What shell32 hands back from GetMenuStringID, pin first then unpin
+// Builds before 1903 pointed the Start Menu verb at the Taskbar pair
+#define IDS_SHELL32_PIN_TASKBAR		5386
+#define IDS_SHELL32_PIN_START		51395
+
 typedef HRESULT (WINAPI* CreateInstance_API)(PVOID,REFIID,PVOID*);
 	typedef struct { 
 		PVOID dunno1;
@@ -48,7 +57,9 @@ public:
 	STDMETHOD_(LRESULT, GetBackupSubDirName)(LPWSTR szOut, UINT cbLen) PURE;
 	STDMETHOD_(void, IsAcceptableTarget)() PURE;
 	STDMETHOD_(DWORD, IsRestricted)() PURE;
-	STDMETHOD_(void, Unimpl2)() PURE;
+	// Slot 15, shell32 asks this before it inserts the menu item
+	// Returning nonzero hides the verb, which is how Win10 turns ours off
+	STDMETHOD_(DWORD, ShouldHideMenu)() PURE;
 	STDMETHOD_(LRESULT, GetMenuStringID)(UINT* w) PURE;
 	STDMETHOD_(int, GetHelpText)(unsigned __int64, LPWSTR, UINT) PURE;
 	STDMETHOD_(LRESULT, GetChangeCount)(DWORD* pdwVal) PURE;
@@ -83,7 +94,7 @@ public:
 	LRESULT GetBackupSubDirName(LPWSTR szOut, UINT cbLen);
 	void IsAcceptableTarget();
 	DWORD IsRestricted();
-	void Unimpl2();
+	DWORD ShouldHideMenu();
 	LRESULT GetMenuStringID(UINT* w);
 	int GetHelpText(unsigned __int64,LPWSTR,UINT);
 	LRESULT GetChangeCount(ULONG* pdwVal);
@@ -116,7 +127,7 @@ typedef struct {
 	PVOID GetBackupSubDirName;
 	PVOID IsAcceptableTarget;
 	PVOID IsRestricted;
-	PVOID Unimpl2;
+	PVOID ShouldHideMenu;
 	GetMenuStringID_API GetMenuStringID;
 	PVOID GetHelpText;
 	PVOID GetChangeCount;

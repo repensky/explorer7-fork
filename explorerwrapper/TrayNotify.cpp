@@ -156,6 +156,19 @@ HRESULT STDMETHODCALLTYPE CTrayNotifyFactory::CreateInstance( IUnknown * pUnkOut
 	HRESULT ret = m_origfactory->CreateInstance(pUnkOuter,IID_IUnknown,(PVOID*)&obj);
 	if (FAILED(ret)) return ret;
 
+	// 7850 is already a Windows 8 build and serves the six method interface itself
+	// It still goes through a wrapper, see CTrayNotify8Wrapper::RegisterCallback for why
+	ITrayNotify8* newnotify;
+	if (SUCCEEDED(obj->QueryInterface(IID_ITrayNotify8,(PVOID*)&newnotify)))
+	{
+		obj->Release();
+		CTrayNotify8Wrapper* passthrough = new CTrayNotify8Wrapper(newnotify);
+		ret = passthrough->QueryInterface(riid,ppvObject);
+		passthrough->Release();
+		return ret;
+	}
+
+	// Windows 7 builds only speak the three method interface, wrap those
 	ITrayNotify7* oldnotify;
 	ret = obj->QueryInterface(IID_ITrayNotify7,(PVOID*)&oldnotify);
 	obj->Release();
@@ -170,6 +183,141 @@ HRESULT STDMETHODCALLTYPE CTrayNotifyFactory::CreateInstance( IUnknown * pUnkOut
 HRESULT STDMETHODCALLTYPE CTrayNotifyFactory::LockServer( BOOL fLock )
 {
 	return m_origfactory->LockServer(fLock);
+}
+
+/*CTRAYNOTIFY8WRAPPER*/
+
+CTrayNotify8Wrapper::CTrayNotify8Wrapper(ITrayNotify8* notify8)
+{
+	m_cRef = 1;
+	m_notify8 = notify8;
+	m_callback = NULL;
+	m_marshaler = NULL;
+	m_cookie = 0;
+	CoCreateFreeThreadedMarshaler(static_cast<ITrayNotify8*>(this), &m_marshaler);
+}
+
+// 7850 takes the cookie back by value and never checks that it found it
+// Asking it to drop a cookie it never issued deletes nothing and faults on the result
+void CTrayNotify8Wrapper::DropRegistration()
+{
+	if (m_cookie)
+	{
+		m_notify8->UnregisterCallback((ULONG*)(ULONG_PTR)m_cookie);
+		m_cookie = 0;
+	}
+	if (m_callback)
+	{
+		m_callback->Release();
+		m_callback = NULL;
+	}
+}
+
+CTrayNotify8Wrapper::~CTrayNotify8Wrapper()
+{
+	DropRegistration();
+	if (m_marshaler)
+		m_marshaler->Release();
+	m_notify8->Release();
+}
+
+HRESULT STDMETHODCALLTYPE CTrayNotify8Wrapper::QueryInterface(REFIID riid,void **ppvObject)
+{
+	if ( !ppvObject ) return E_POINTER;
+	*ppvObject = NULL;
+
+	if (riid == IID_IUnknown || riid == IID_ITrayNotify8)
+	{
+		*ppvObject = static_cast<ITrayNotify8*>(this);
+		AddRef();
+		return S_OK;
+	}
+	if (riid == IID_IMarshal && m_marshaler)
+	{
+		return m_marshaler->QueryInterface(riid,ppvObject);
+	}
+	return E_NOINTERFACE;
+}
+
+ULONG STDMETHODCALLTYPE CTrayNotify8Wrapper::AddRef(void)
+{
+	return InterlockedIncrement(&m_cRef);
+}
+
+ULONG STDMETHODCALLTYPE CTrayNotify8Wrapper::Release(void)
+{
+	if (InterlockedDecrement(&m_cRef) == 0)
+	{
+		delete this;
+		return 0;
+	}
+	return m_cRef;
+}
+
+// The tray must never keep the caller's own sink, see notes/traynotify-callback-7850.md
+// 7850 sends NOTIFYITEM callbacks that Windows 10 actxprxy cannot marshal
+HRESULT STDMETHODCALLTYPE CTrayNotify8Wrapper::RegisterCallback(IUnknown* p1,ULONG* p2)
+{
+	DropRegistration();
+
+	if (p2)
+		*p2 = 0;
+
+	// No sink means the caller is dropping the registration, 7850 fails fast if handed a null one
+	if (!p1)
+		return S_OK;
+
+	INotificationCB* clientCallback;
+	HRESULT ret = p1->QueryInterface(__uuidof(INotificationCB),(void**)&clientCallback);
+	if (FAILED(ret))
+		return ret;
+
+	// Forwarding stays on for the enumeration the tray does inside the call,
+	// then off for the live updates that are the ones that crash
+	CTrayNotificationCallback* callback = new CTrayNotificationCallback(clientCallback);
+
+	// The cookie goes to a local because 7850 fails fast on a null cookie pointer
+	ULONG cookie = 0;
+	ret = m_notify8->RegisterCallback(callback,&cookie);
+	callback->StopForwarding();
+	if (FAILED(ret))
+	{
+		callback->Release();
+		return ret;
+	}
+
+	m_callback = callback;
+	m_cookie = cookie;
+	if (p2)
+		*p2 = cookie;
+	return ret;
+}
+
+// The caller's cookie is ignored, one wrapper only ever holds one registration
+HRESULT STDMETHODCALLTYPE CTrayNotify8Wrapper::UnregisterCallback(ULONG*)
+{
+	DropRegistration();
+	return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CTrayNotify8Wrapper::SetPreference(const NOTIFYITEM* p1)
+{
+	return m_notify8->SetPreference(p1);
+}
+
+HRESULT STDMETHODCALLTYPE CTrayNotify8Wrapper::EnableAutoTray(int p1)
+{
+	return m_notify8->EnableAutoTray(p1);
+}
+
+HRESULT STDMETHODCALLTYPE CTrayNotify8Wrapper::DoAction(BOOL p1)
+{
+	return m_notify8->DoAction(p1);
+}
+
+HRESULT STDMETHODCALLTYPE CTrayNotify8Wrapper::SetWindowingEnvironmentConfig(IUnknown* p1)
+{
+	return m_notify8->SetWindowingEnvironmentConfig(p1);
 }
 
 /*CTRAYNOTIFYWRAPPER*/

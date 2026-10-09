@@ -2,6 +2,7 @@
 #include "dbgprint.h"
 #include "pathcch.h"
 #include "OSVersion.h"
+#include "Explorer7Base.h"
 
 struct UXTHEMEFILE
 {
@@ -201,10 +202,7 @@ static void GetExplorer7ThemePath(LPWSTR szThemePath, DWORD cchThemePath)
 		WCHAR szThemeFileName[MAX_PATH];
 		StringCchCopyW(szThemeFileName, ARRAYSIZE(szThemeFileName), szThemePath);
 
-		GetModuleFileNameW(NULL, szThemePath, cchThemePath);
-		WCHAR *backslash = StrRChrW(szThemePath, NULL, L'\\');
-		if (backslash && *backslash == L'\\')
-			*backslash = L'\0';
+		GetExplorer7BaseDir(szThemePath, cchThemePath);
 
 		StringCchCatW(szThemePath, cchThemePath, L"\\Theme\\");
 		StringCchCatW(szThemePath, cchThemePath, szThemeFileName);
@@ -213,11 +211,7 @@ static void GetExplorer7ThemePath(LPWSTR szThemePath, DWORD cchThemePath)
 		return;
 	}
 
-	// get directory of explorer.exe (NOT the working directory)
-	GetModuleFileNameW(NULL, szThemePath, cchThemePath);
-	WCHAR *backslash = StrRChrW(szThemePath, NULL, L'\\');
-	if (backslash && *backslash == L'\\')
-		*backslash = L'\0';
+	GetExplorer7BaseDir(szThemePath, cchThemePath);
 
 	StringCchCatW(szThemePath, cchThemePath, L"\\Theme\\");
 
@@ -283,13 +277,51 @@ bool IsHighContrastEnabled()
 		(highContrast.dwFlags & HCF_HIGHCONTRASTON);
 }
 
+//---Deferred theme load------------------------------------
+
+// Startup only resolves the uxtheme exports, the parse waits for the first call that wants it
+// A launcher explorer.exe hands its window to the shell and never makes that call
+static volatile LONG g_themeLoadPending = 0;
+static CRITICAL_SECTION g_themeLoadLock;
+static bool g_themeLoadLockReady = false;
+static volatile DWORD g_themeLoadingThread = 0;
+
+static void LoadInactiveTheme();
+
+bool IsInactiveThemePending()
+{
+	return g_themeLoadPending != 0;
+}
+
+// Other threads wait here until the parse is done, the loading thread itself never waits
+static void EnsureInactiveThemeLoaded()
+{
+	if (!g_themeLoadPending || !g_themeLoadLockReady)
+		return;
+	if (g_themeLoadingThread == GetCurrentThreadId())
+		return;
+
+	EnterCriticalSection(&g_themeLoadLock);
+	if (g_themeLoadPending)
+	{
+		g_themeLoadingThread = GetCurrentThreadId();
+		dbgprintf(L"inactive theme: first use, loading now");
+		LoadInactiveTheme();
+		g_themeLoadingThread = 0;
+		InterlockedExchange(&g_themeLoadPending, 0);
+	}
+	LeaveCriticalSection(&g_themeLoadLock);
+}
+
 bool HasLoadedInactiveTheme()
 {
+	EnsureInactiveThemeLoaded();
 	return g_hasLoadedTheme;
 }
 
 HTHEME OpenLoadedInactiveTheme(HWND hwnd, LPCWSTR pszClassList, DWORD dwFlags)
 {
+	EnsureInactiveThemeLoaded();
 	if (!g_hasLoadedTheme || !OpenThemeDataFromFile)
 		return NULL;
 
@@ -308,7 +340,8 @@ HTHEME OpenLoadedInactiveTheme(HWND hwnd, LPCWSTR pszClassList, DWORD dwFlags)
 }
 
 
-void ThemeManagerInitialize()
+// The uxtheme exports the inactive theme needs, false leaves no theme loaded
+static bool ResolveInactiveThemeApis()
 {
 	//dont bother error checking, if u dont got uxtheme, ur system is prob already messed up and theres no saving u
 	HMODULE hUxTheme = GetModuleHandleW(L"uxtheme.dll");
@@ -316,7 +349,7 @@ void ThemeManagerInitialize()
 	{
 		RetireLoadedTheme();
 		dbgprintf(L"uxtheme.dll unavailable");
-		return;
+		return false;
 	}
 	GetThemeDefaults = (GetThemeDefaults_t)GetProcAddress(hUxTheme, (LPCSTR)7);
 	LoaderLoadTheme = (LoaderLoadTheme_t)GetProcAddress(hUxTheme, (LPCSTR)92);
@@ -328,9 +361,43 @@ void ThemeManagerInitialize()
 	{
 		RetireLoadedTheme();
 		dbgprintf(L"Inactive theme APIs unavailable");
-		return;
+		return false;
+	}
+	return true;
+}
+
+// Startup form, the parse itself waits for the first call that wants the theme
+void ThemeManagerInitializeDeferred()
+{
+	if (!g_themeLoadLockReady)
+	{
+		InitializeCriticalSection(&g_themeLoadLock);
+		g_themeLoadLockReady = true;
 	}
 
+	if (!ResolveInactiveThemeApis())
+		return;
+
+	InterlockedExchange(&g_themeLoadPending, 1);
+	dbgprintf(L"inactive theme: load deferred until first use");
+}
+
+// Loads at once, the theme change reload needs the new theme before it repaints
+void ThemeManagerInitialize()
+{
+	if (g_themeLoadLockReady)
+		EnterCriticalSection(&g_themeLoadLock);
+
+	InterlockedExchange(&g_themeLoadPending, 0);
+	if (ResolveInactiveThemeApis())
+		LoadInactiveTheme();
+
+	if (g_themeLoadLockReady)
+		LeaveCriticalSection(&g_themeLoadLock);
+}
+
+static void LoadInactiveTheme()
+{
 	g_highContrastThemeActive = IsHighContrastEnabled();
 	if (g_highContrastThemeActive)
 	{
@@ -351,6 +418,9 @@ void ThemeManagerInitialize()
 
 void ThemeManagerUninitialize()
 {
+	// A theme never loaded by now is not needed while the process goes down
+	InterlockedExchange(&g_themeLoadPending, 0);
+
 	CloseRetiredInactiveThemeResources();
 	CloseLoadedInactiveThemeHandles();
 	FreeLoadedTheme();

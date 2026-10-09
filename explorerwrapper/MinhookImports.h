@@ -1,5 +1,6 @@
 #pragma once
 #include "util.h"
+#include "ShellAccentOverride.h"
 #include "common.h"
 #include "dbgprint.h"
 #include "OptionConfig.h"
@@ -7,6 +8,9 @@
 #include "TypeDefinitions.h"
 #include "MinHook.h"
 #include "NscTree.h"
+#include "DesktopIconRows.h"
+#include "SearchPrompt.h"
+#include "TooltipSafeZone.h"
 #include <commctrl.h>
 
 
@@ -38,6 +42,21 @@ static bool IsStartMenuWindowOrChild(HWND hwnd)
 		IsStartMenuWindow(GetAncestor(hwnd, GA_ROOTOWNER), startMenuAtom);
 }
 
+// The notification overflow is a top level popup, not a taskbar child
+// Its toolbar and syslink are children, so match on the root window
+static bool IsTrayOverflowWindow(HWND hwnd)
+{
+	HWND root = GetAncestor(hwnd, GA_ROOT);
+	if (!root)
+		return false;
+
+	WCHAR cls[64];
+	if (!GetClassNameW(root, cls, ARRAYSIZE(cls)))
+		return false;
+
+	return lstrcmpiW(cls, L"NotifyIconOverflowWindow") == 0;
+}
+
 static bool IsShellThemeWindow(HWND hwnd)
 {
 	if (!hwnd)
@@ -45,6 +64,10 @@ static bool IsShellThemeWindow(HWND hwnd)
 
 	HWND taskbar = GetTaskbarWnd();
 	if (taskbar && (hwnd == taskbar || IsChild(taskbar, hwnd)))
+		return true;
+
+	// Both builds ask for Flyout here, so it needs the bundled msstyles
+	if (IsTrayOverflowWindow(hwnd))
 		return true;
 
 	if (IsStartMenuWindowOrChild(hwnd))
@@ -406,8 +429,31 @@ static bool IsStartMenuThreadThemeClass(LPCWSTR pszClassList)
 	return false;
 }
 
+// The same yes or no the body below gives, without tracking a thread or loading the theme
+static bool InactiveThemeWanted(HWND hwnd, LPCWSTR pszClassList)
+{
+	if (IsSystemThemeClass(pszClassList) || IsNativeSearchThemeClass(pszClassList))
+		return false;
+
+	if (hwnd && IsShellThemeWindow(hwnd))
+		return true;
+
+	bool startMenuThread = IsStartMenuThemeThread() || IsStartMenuWindowOrChild(hwnd)
+		|| IsStartMenuThemeClass(pszClassList);
+	return IsShellThemeClass(pszClassList) || (startMenuThread && IsStartMenuThreadThemeClass(pszClassList));
+}
+
 static bool ShouldOpenInactiveTheme(HWND hwnd, LPCWSTR pszClassList)
 {
+	// Until a call really wants the theme it stays unparsed, the launcher never asks for one
+	if (IsInactiveThemePending() && !InactiveThemeWanted(hwnd, pszClassList))
+	{
+		// The loaded path below tracks the thread at this point, so the state stays the same
+		if (!IsSystemThemeClass(pszClassList) && !IsNativeSearchThemeClass(pszClassList))
+			MaybeTrackStartMenuThemeThread(hwnd, pszClassList);
+		return false;
+	}
+
 	if (!HasLoadedInactiveTheme())
 		return false;
 
@@ -453,8 +499,6 @@ HTHEME __stdcall OpenThemeData_Hook(HWND hwnd, LPCWSTR pszClassList)
 	else
 		theme = fOpenThemeData(hwnd, pszClassList);
 
-	if (theme == nullptr)
-		dbgprintf(L"OPENTHEMEDATA FAILED %s", pszClassList);
 	return theme;
 }
 
@@ -481,8 +525,6 @@ HTHEME __stdcall OpenThemeDataForDpi_Hook(HWND hwnd, LPCWSTR pszClassList, UINT 
 		theme = fOpenThemeDataForDpi(hwnd, pszClassList, dpi);
 	}
 
-	if (theme == nullptr)
-		dbgprintf(L"OPENTHEMEDATAFORDPI FAILED %s", pszClassList);
 	return theme;
 }
 
@@ -505,8 +547,6 @@ HTHEME __stdcall OpenThemeDataEx_Hook(HWND hwnd, LPCWSTR pszClassList, DWORD dwF
 	else
 		theme = fOpenThemeDataEx(hwnd, pszClassList, dwFlags);
 
-	if (theme == nullptr)
-		dbgprintf(L"OPENTHEMEDATAEX FAILED %s", pszClassList);
 	return theme;
 }
 HTHEME __fastcall OpenNcThemeData_Hook(HWND hwnd, LPCWSTR pszClassList)
@@ -529,19 +569,22 @@ void CPniMainDlg_ShowFlyoutNEW() // don't bother with the parameters as we aren'
 
 void RenderThumbnail(PVOID This, int animoffset, int bNoRedraw)
 {
+	// 7850 moved the theme handle to 0xA8, the rect and window did not move
 	RECT rc = *(RECT*)((PBYTE)This + 0x68);
 	HWND hwnd = *(HWND*)((PBYTE)This + 0x60);
-	HTHEME hthem = *(HTHEME*)((PBYTE)This + 0x98);
+	HTHEME hthem = *(HTHEME*)((PBYTE)This + (s_BuildRuntime == BUILDRUNTIME_7850 ? 0xA8 : 0x98));
 
 	renderThumbnail_orig(This, animoffset, bNoRedraw);
 
-	MARGINS mar;
+	// Zeroed so a failed lookup leaves the rect alone instead of adding stack garbage
+	MARGINS mar = {};
 	GetThemeMargins(hthem, NULL, 2, 0, TMT_CONTENTMARGINS, NULL, &mar);
 	rc.left += mar.cxLeftWidth;
 	rc.right -= mar.cxRightWidth;
 	rc.top += mar.cyTopHeight;
 	rc.bottom -= mar.cyBottomHeight;
-	DwmpUpdateAccentBlurRect(hwnd, &rc);
+	// Win7 explorer never calls ordinal 159 itself, this is the only caller
+	UpdateThumbnailAccentBlurRect(hwnd, &rc);
 }
 
 HICON GetUWPIcon(HWND a2)
@@ -550,10 +593,8 @@ HICON GetUWPIcon(HWND a2)
 	IShellItemImageFactory* psiif = nullptr;
 	IPropertyStore* ips;
 	SHGetPropertyStoreForWindow(a2, IID_PPV_ARGS(&ips));
-	GUID myGuid = { 0x9F4C2855, 0x9F79, 0x4B39, {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3} };
-	PROPERTYKEY propertyKey = { myGuid, 5 };
 	PROPVARIANT pv;
-	ips->GetValue(propertyKey, &pv);
+	ips->GetValue(PKEY_AppUserModel_ID, &pv);
 	if (pv.vt == VT_LPWSTR)
 	{
 		LPCWSTR aumid = pv.pwszVal;
@@ -617,7 +658,8 @@ VOID UpdateItemIcon(PVOID This, int a2)
 	typedef void* (__fastcall* GetTaskItemFunc)(void*);
 	typedef HWND(__fastcall* GetWindowFunc)(void*);
 
-	HDPA hdpaTaskThumbnails = *(HDPA*)((PBYTE)This + 0xB0);
+	// 7850 moved this member to 0xC8, both vtable slots below are unchanged
+	HDPA hdpaTaskThumbnails = *(HDPA*)((PBYTE)This + (s_BuildRuntime == BUILDRUNTIME_7850 ? 0xC8 : 0xB0));
 	auto v4 = DPA_FastGetPtr(hdpaTaskThumbnails, a2);
 	auto vtable = *(uintptr_t**)v4;
 	GetTaskItemFunc GetTaskItem = (GetTaskItemFunc)vtable[0x60 / sizeof(uintptr_t)];
@@ -643,6 +685,7 @@ HRESULT __fastcall OnShellHookMessage_Hook(void* a1)
 {
 	UNREFERENCED_PARAMETER(a1);
 
+	dbgprintf(L"XamlLauncher::OnShellHookMessage reached, first %d", (int)!fShowLauncher);
 	if (fShowLauncher)
 	{
 		HWND taskbar = GetTaskbarWnd();
@@ -660,16 +703,20 @@ HRESULT __fastcall OnShellHookMessage_Hook(void* a1)
 
 void SetUpThemeCompositionHooks()
 {
-	MH_CreateHookApi(L"dwmapi.dll", "DwmIsCompositionEnabled", DwmIsCompositionEnabledNEW, reinterpret_cast<LPVOID*>(&DwmIsCompositionEnabledOrig));
+	// No inline hook here, its trampoline would jump over dwm unextend and report DWM as on
+	// Milestone2 only patches the import, so the call still lands on the hooked export
+	//MH_CreateHookApi(L"dwmapi.dll", "DwmIsCompositionEnabled", DwmIsCompositionEnabledNEW, reinterpret_cast<LPVOID*>(&DwmIsCompositionEnabledOrig));
 	MH_CreateHookApi(L"dwmapi.dll", "DwmExtendFrameIntoClientArea", DwmExtendFrameIntoClientAreaNEW, reinterpret_cast<LPVOID*>(&DwmExtendFrameIntoClientAreaOrig));
 	MH_CreateHookApi(L"dwmapi.dll", "DwmSetWindowAttribute", DwmSetWindowAttributeNEW, reinterpret_cast<LPVOID*>(&DwmSetWindowAttributeOrig));
 	MH_CreateHook(static_cast<LPVOID>(SetWindowCompositionAttribute), SetWindowCompositionAttributeNEW, reinterpret_cast<LPVOID*>(&SetWindowCompositionAttribute));
+	SetUpShellAccentOverrideHooks();
 }
 
 void SetUpThemeManager()
 {
 	// Initialize the theme manager and declare the types for the UXTheme apis we're hooking
-	ThemeManagerInitialize();
+	// The theme file itself is parsed on first use, not here
+	ThemeManagerInitializeDeferred();
 
 	fOpenThemeData = decltype(fOpenThemeData)(GetProcAddress(GetModuleHandle(L"uxtheme.dll"), "OpenThemeData"));
 	fOpenThemeDataForDpi = decltype(fOpenThemeDataForDpi)(GetProcAddress(GetModuleHandle(L"uxtheme.dll"), "OpenThemeDataForDpi"));
@@ -736,14 +783,36 @@ void UpdateTrayWindowDefinitions()
 {
 	// Hook and update definitions of what windows should be added to the tray - largely for UWP purposes, but essentially zero-cost so included on both immersive on and off modes.
 	void* _ShouldAddWindowToTray = (void*)FindPattern((uintptr_t)GetModuleHandle(0), "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC ?? 48 8B F9 33 DB");
+	if (!_ShouldAddWindowToTray)
+		_ShouldAddWindowToTray = (void*)FindPattern((uintptr_t)GetModuleHandle(0), "48 8B C4 48 89 58 10 48 89 48 08 56 48 83 EC 30 48 8D 50 E8 33 DB FF 15 ?? ?? ?? ?? 85 C0");
+
+	// 7601 tests the IsWindow result with CMP EAX,EBX, 7785 uses TEST EAX,EAX
 	void* _IsWindowNotDesktopOrTray = (void*)FindPattern((uintptr_t)GetModuleHandle(0), "48 89 5C 24 ?? 57 48 83 EC ?? 48 8B F9 33 DB FF 15 ?? ?? ?? ?? 3B C3 74 ?? 48 3B 3D");
-	MH_CreateHook(static_cast<LPVOID>(_ShouldAddWindowToTray), ShouldAddWindowToTray, reinterpret_cast<LPVOID*>(&_ShouldAddWindowToTray));
-	MH_CreateHook(static_cast<LPVOID>(_IsWindowNotDesktopOrTray), IsWindowNotDesktopOrTray, reinterpret_cast<LPVOID*>(&_IsWindowNotDesktopOrTray));
+	if (!_IsWindowNotDesktopOrTray)
+		_IsWindowNotDesktopOrTray = (void*)FindPattern((uintptr_t)GetModuleHandle(0), "48 89 5C 24 ?? 57 48 83 EC ?? 48 8B F9 33 DB FF 15 ?? ?? ?? ?? 85 C0 74 ?? 48 3B 3D");
+	// 7850 saves three registers through RAX before the IsWindow call
+	if (!_IsWindowNotDesktopOrTray)
+		_IsWindowNotDesktopOrTray = (void*)FindPattern((uintptr_t)GetModuleHandle(0), "48 8B C4 48 89 58 10 48 89 70 18 48 89 48 08 57 48 83 EC 20 33 F6 48 8B F9 8B DE FF 15");
+
+	// Missing either hook leaves stray taskbar buttons, see notes/explorer7-taskbar-dupe.md
+	if (_ShouldAddWindowToTray)
+		MH_CreateHook(static_cast<LPVOID>(_ShouldAddWindowToTray), ShouldAddWindowToTray, reinterpret_cast<LPVOID*>(&_ShouldAddWindowToTray));
+	else
+		dbgprintf(L"explorer7: ShouldAddWindowToTray pattern not found");
+
+	if (_IsWindowNotDesktopOrTray)
+		MH_CreateHook(static_cast<LPVOID>(_IsWindowNotDesktopOrTray), IsWindowNotDesktopOrTray, reinterpret_cast<LPVOID*>(&_IsWindowNotDesktopOrTray));
+	else
+		dbgprintf(L"explorer7: IsWindowNotDesktopOrTray pattern not found");
 }
 
 void SetProgramListNscTreeAttributes()
 {
+	// CNSCHost members are identical on 7850, only the prologue differs
 	CNSCHost_FillNSCOg = (decltype(CNSCHost_FillNSCOg))FindPattern((uintptr_t)GetModuleHandle(0), "48 89 5C 24 18 57 48 83 EC 30 33 DB 48 8B F9 39 99 CC 00 00 00");
+	if (!CNSCHost_FillNSCOg)
+		CNSCHost_FillNSCOg = (decltype(CNSCHost_FillNSCOg))FindPattern((uintptr_t)GetModuleHandle(0), "48 8B C4 48 89 58 10 48 89 48 08 57 48 83 EC 40 33 DB 48 8B F9 39 99 CC 00 00 00");
+
 	if (CNSCHost_FillNSCOg)
 		MH_CreateHook(static_cast<LPVOID>(CNSCHost_FillNSCOg), CNSCHost_FillNSC, reinterpret_cast<LPVOID*>(&CNSCHost_FillNSCOg)); //this hook is in nsctree.h now
 }
@@ -754,6 +823,8 @@ void HandleThumbnailColorization()
 	// Thumbnail rendering fix for colorization modes
 	char* CTaskListThumbnailWnd_Render = "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 20 44 89 40 18 57 41 54 41 55 41 56 41 57 48 81 EC 90 00 00 00 48 8B F9";
 	void* CTLWRPattern = (void*)FindPattern((uintptr_t)GetModuleHandle(NULL), CTaskListThumbnailWnd_Render);
+	if (!CTLWRPattern)
+		CTLWRPattern = (void*)FindPattern((uintptr_t)GetModuleHandle(NULL), "48 8B C4 48 89 58 20 44 89 40 18 89 50 10 48 89 48 08 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC A0 00 00 00");
 
 	if (CTLWRPattern)
 	{
@@ -768,8 +839,11 @@ void RenderStoreAppsOnTaskbar()
 		// Part 1: CTaskListThumbnailWnd::_SetIcon
 		// Must be defined so that it can be called by our hook functions
 		// However, we only assign the definition if we can actually detect it to begin with
+		// 7850 moved the member this reads from 0xB0 to 0xC8
 		char* CTaskListThumbnailWnd_SetIcon = "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 49 63 D8 4C 8B 81 B0 00 00 00";
 		setIconThumb_t CTLTWSIPattern = (setIconThumb_t)FindPattern((uintptr_t)GetModuleHandle(NULL), CTaskListThumbnailWnd_SetIcon);
+		if (!CTLTWSIPattern)
+			CTLTWSIPattern = (setIconThumb_t)FindPattern((uintptr_t)GetModuleHandle(NULL), "4C 8B DC 45 89 4B 20 45 89 43 18 49 89 53 10 49 89 4B 08 53 56 57 48 83 EC 20 48 8B 81 C8 00 00 00");
 
 		if (CTLTWSIPattern)
 		{
@@ -784,6 +858,8 @@ void RenderStoreAppsOnTaskbar()
 		// Must be hooked accordingly so the icon can be overridden as necessary for the TaskItem buttons
 		char* CTaskBand_SetWindowIcon = "FF F3 55 56 57 41 54 41 55 41 56 41 57 48 81 EC F8 06 00 00";
 		void* CTBSWIPattern = (void*)FindPattern((uintptr_t)GetModuleHandle(NULL), CTaskBand_SetWindowIcon);
+		if (!CTBSWIPattern)
+			CTBSWIPattern = (void*)FindPattern((uintptr_t)GetModuleHandle(NULL), "4C 8B DC 45 89 4B 20 4D 89 43 18 49 89 53 10 49 89 4B 08 55 53 56 48 8B EC 48 83 EC 70");
 
 		if (CTBSWIPattern)
 		{
@@ -794,6 +870,8 @@ void RenderStoreAppsOnTaskbar()
 		// Hooking this function will allow the thumbnail icon to be updated as applicable
 		char* CTaskListThumbnailWnd_UpdateItemIcon = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 30 48 8B 81 B0 00 00 00";
 		void* CTLTWUIIPattern = (void*)FindPattern((uintptr_t)GetModuleHandle(NULL), CTaskListThumbnailWnd_UpdateItemIcon);
+		if (!CTLTWUIIPattern)
+			CTLTWUIIPattern = (void*)FindPattern((uintptr_t)GetModuleHandle(NULL), "48 8B C4 48 89 58 18 48 89 70 20 89 50 10 48 89 48 08 57 48 83 EC 30 48 8B 81 C8 00 00 00");
 
 		if (CTLTWUIIPattern)
 		{
@@ -819,28 +897,69 @@ void CreateImmersiveShell()
 		SetWindowBandApiOrg = decltype(SetWindowBandApiOrg)(GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowBand"));
 		RegisterHotKeyApiOrg = decltype(RegisterHotKeyApiOrg)(GetProcAddress(GetModuleHandle(L"user32.dll"), "RegisterHotKey"));
 
-		MH_CreateHook(static_cast<LPVOID>(CreateWindowInBandOrig), CreateWindowInBandNew, reinterpret_cast<LPVOID*>(&CreateWindowInBandOrig));
-		MH_CreateHook(static_cast<LPVOID>(CreateWindowInBandExOrig), CreateWindowInBandExNew, reinterpret_cast<LPVOID*>(&CreateWindowInBandExOrig));
+		LPVOID rawBand = GetProcAddress(GetModuleHandle(L"user32.dll"), "CreateWindowInBand");
+		LPVOID rawBandEx = GetProcAddress(GetModuleHandle(L"user32.dll"), "CreateWindowInBandEx");
+
+		MH_STATUS bandStatus = MH_CreateHook(static_cast<LPVOID>(CreateWindowInBandOrig), CreateWindowInBandNew, reinterpret_cast<LPVOID*>(&CreateWindowInBandOrig));
+		MH_STATUS bandExStatus = MH_CreateHook(static_cast<LPVOID>(CreateWindowInBandExOrig), CreateWindowInBandExNew, reinterpret_cast<LPVOID*>(&CreateWindowInBandExOrig));
+
+		// The Ex path was reaching the plain hook, which silently drops the type flags
+		dbgprintf(L"explorer7: band raw %p ex raw %p, trampolines %p and %p, status %d and %d",
+			rawBand, rawBandEx, CreateWindowInBandOrig, CreateWindowInBandExOrig,
+			(int)bandStatus, (int)bandExStatus);
 		MH_CreateHook(static_cast<LPVOID>(SetWindowBandApiOrg), SetWindowBandNew, reinterpret_cast<LPVOID*>(&SetWindowBandApiOrg));
 		MH_CreateHook(static_cast<LPVOID>(RegisterHotKeyApiOrg), RegisterWindowHotkeyNew, reinterpret_cast<LPVOID*>(&RegisterHotKeyApiOrg));
 
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2581), RetTrue, NULL); // GetWindowTrackInfoAsync
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2563), RetTrue, NULL); // ClearForeground
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2628), RetTrue, NULL); // CreateWindowGroup
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2629), RetTrue, NULL); // DeleteWindowGroup
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2631), RetTrue, NULL); // EnableWindowGroupPolicy
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2627), RetTrue, NULL); // SetBridgeWindowChild
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2511), RetTrue, NULL); // SetFallbackForeground
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2566), RetTrue, NULL); // SetWindowArrangement
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2632), RetTrue, NULL); // SetWindowGroup
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2579), RetTrue, NULL); // SetWindowShowState
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2585), RetTrue, NULL); // UpdateWindowTrackingInfo
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2514), RetTrue, NULL); // RegisterEdgy
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2542), RetTrue, NULL); // RegisterShellPTPListener
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2537), RetTrue, NULL); // SendEventMessage
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2513), RetTrue, NULL); // SetActiveProcessForMonitor
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2564), RetTrue, NULL); // RegisterWindowArrangementCallout
-		MH_CreateHook(GetProcAddress(GetModuleHandle(L"user32.dll"), (LPCSTR)2567), RetTrue, NULL); // EnableShellWindowManagementBehavior
+		// Keeps Microsoft account sign in dialogs alive and usable
+		SignInFrameFixInit();
+
+		// The Store leaves its content behind on a move, nothing else does
+		StoreContentFixInit();
+
+		// user32 exports these by ordinal only and 24H2 reused two of the numbers
+		// Names were read out of the 26100 export table with symbols, see notes/24h2-support.md
+		struct ImmersiveOrdinal { WORD ordinal; LPCWSTR name; ULONG goneFrom; };
+		static const ImmersiveOrdinal c_retTrueOrdinals[] =
+		{
+			{ 2581, L"GetWindowTrackInfoAsync", 0 },
+			{ 2563, L"ClearForeground", 0 },
+			{ 2628, L"CreateWindowGroup", 26100 },
+			{ 2629, L"DeleteWindowGroup", 26100 },
+			{ 2631, L"EnableWindowGroupPolicy", 26100 },
+			{ 2627, L"SetBridgeWindowChild", 0 },
+			{ 2511, L"SetFallbackForeground", 26100 },
+			{ 2566, L"SetWindowArrangement", 0 },
+			{ 2632, L"SetWindowGroup", 26100 },
+			{ 2579, L"SetWindowShowState", 0 },
+			{ 2585, L"UpdateWindowTrackingInfo", 0 },
+			{ 2514, L"RegisterEdgy", 0 },
+			{ 2542, L"RegisterShellPTPListener", 26100 },
+			{ 2537, L"SendEventMessage", 0 },
+			{ 2513, L"SetActiveProcessForMonitor", 0 },
+			{ 2564, L"RegisterWindowArrangementCallout", 0 },
+			{ 2567, L"EnableShellWindowManagementBehavior", 0 },
+		};
+
+		// 2511 is SetShellSpecialWindow and 2542 is SetCoveredWindowStates on 24H2, hooking those would hurt
+		ULONG build = g_osVersion.BuildNumber();
+		HMODULE user32 = GetModuleHandle(L"user32.dll");
+		for (int i = 0; i < ARRAYSIZE(c_retTrueOrdinals); i++)
+		{
+			const ImmersiveOrdinal& o = c_retTrueOrdinals[i];
+			if (o.goneFrom && build >= o.goneFrom)
+			{
+				dbgprintf(L"explorer7: user32 ordinal %u (%s) is gone or reused on this build, left alone", o.ordinal, o.name);
+				continue;
+			}
+
+			LPVOID target = GetProcAddress(user32, (LPCSTR)(ULONG_PTR)o.ordinal);
+			if (!target)
+			{
+				dbgprintf(L"explorer7: user32 ordinal %u (%s) not exported here", o.ordinal, o.name);
+				continue;
+			}
+			MH_CreateHook(target, RetTrue, NULL);
+		}
 	}
 }
 
@@ -858,12 +977,19 @@ void _OnHShellTaskMan()
 		HMODULE twinUI_PCShell = LoadLibrary(L"twinui.pcshell.dll");
 		if (twinUI_PCShell) // If it does...
 		{
-			XamlLauncher_OnShellHookMessage = "40 53 48 83 EC 20 48 8B D9 48 8B 89 ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 01 48 8B 40 ?? FF 15 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 38 83";
+			// 24H2, XamlLauncher::OnShellHookMessage opens with a feature gate and a gaming check
+			XamlLauncher_OnShellHookMessage = "40 53 48 83 EC 20 48 8B D9 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 48 FF 15 ?? ?? ?? ?? 0F 1F 44 00 00 85 C0 74 ?? 80 BB ?? ?? 00 00 00 74 ?? 48 8D 4B D8 33 D2 E8";
 			XLOSHMPattern = (char*)FindPattern((uintptr_t)twinUI_PCShell, XamlLauncher_OnShellHookMessage);
-
-			if (XLOSHMPattern) // VB
+			if (!XLOSHMPattern)
 			{
-				MH_CreateHook(static_cast<LPVOID>(XLOSHMPattern), OnShellHookMessage_Hook, reinterpret_cast<LPVOID*>(&OnShellHookMessage));
+				XamlLauncher_OnShellHookMessage = "40 53 48 83 EC 20 48 8B D9 48 8B 89 ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 01 48 8B 40 ?? FF 15 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 38 83";
+				XLOSHMPattern = (char*)FindPattern((uintptr_t)twinUI_PCShell, XamlLauncher_OnShellHookMessage);
+			}
+
+			if (XLOSHMPattern) // 24H2, then VB
+			{
+				MH_STATUS st = MH_CreateHook(static_cast<LPVOID>(XLOSHMPattern), OnShellHookMessage_Hook, reinterpret_cast<LPVOID*>(&OnShellHookMessage));
+				dbgprintf(L"XamlLauncher::OnShellHookMessage at %p hooked, status %d", XLOSHMPattern, (int)st);
 			}
 			else
 			{
@@ -1112,12 +1238,16 @@ void ChangeMinhookImports()
 {
 	MH_Initialize();
 
+	NeuterExplorerHostSplit(); // Keep Control Panel windows in this process
 	HookDialogForeground(); // Ensure Run error dialogs come to the foreground
 	SetUpThemeCompositionHooks(); // Process-wide theme/composition routing
 	SetUpThemeManager(); // Local visual style management init
 	FixNonImmersivePniDui(); // Non-immersive network flyout handling
 	UpdateTrayWindowDefinitions(); // Ensure tray exclusion is corrected for modern Windows
 	SetProgramListNscTreeAttributes(); // Restore the relevant contents to the program list
+	HookDesktopIconRows(); // Share the leftover desktop height between icon rows like Windows 7
+	HookSearchPrompt(); // Keep the Start menu search prompt when the 24H2 rich edit takes focus
+	HookToolTipSafeZone(); // Jump list highlight follows the cursor under a shown tooltip on 24H2
 	HandleThumbnailColorization(); // Thumbnail colorization to match
 	RenderStoreAppsOnTaskbar(); // UWP icon rendering for the taskbar
 	CreateImmersiveShell(); // Immersive shell initialisation

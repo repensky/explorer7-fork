@@ -87,6 +87,38 @@ private:
 	long m_cRef;
 };
 
+//---CTrayNotify8Wrapper--------------------------------
+// Thin pass through for builds that already serve ITrayNotify8
+// Exists only to keep the tray from holding a caller's sink directly
+class CTrayNotify8Wrapper : public ITrayNotify8
+{
+public:
+	CTrayNotify8Wrapper(ITrayNotify8* notify8);
+	~CTrayNotify8Wrapper();
+
+	//IUnknown
+	STDMETHODIMP QueryInterface(REFIID riid,void **ppvObject);
+	STDMETHODIMP_(ULONG) AddRef( void);
+	STDMETHODIMP_(ULONG) Release( void);
+
+	//ITrayNotify8
+	STDMETHODIMP RegisterCallback(IUnknown*,ULONG*);
+	STDMETHODIMP UnregisterCallback(ULONG*);
+	STDMETHODIMP SetPreference(const NOTIFYITEM*);
+	STDMETHODIMP EnableAutoTray(int);
+	STDMETHODIMP DoAction(BOOL);
+	STDMETHODIMP SetWindowingEnvironmentConfig(IUnknown*);
+private:
+	// Hands back the one registration this wrapper made, if it still holds one
+	void DropRegistration();
+
+	ITrayNotify8* m_notify8;
+	CTrayNotificationCallback* m_callback;
+	IUnknown* m_marshaler;
+	ULONG m_cookie;
+	long m_cRef;
+};
+
 class CTrayNotifyWrapper : public ITrayNotify7, public ITrayNotify8
 {
 public:

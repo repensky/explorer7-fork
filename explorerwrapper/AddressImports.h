@@ -1,11 +1,15 @@
-#pragma once
+﻿#pragma once
 #include "util.h"
+#include "ShellAccentOverride.h"
 #include "common.h"
 #include "dbgprint.h"
 #include "OptionConfig.h"
 #include "OSVersion.h"
 #include "TypeDefinitions.h"
+#include "InitialMFU.h"
 
+// Defined in dllmain.cpp, true only on Win11 22000+ under the IFEO loader
+bool IsSwapShell();
 
 #ifndef DWM_E_COMPOSITIONDISABLED
 #define DWM_E_COMPOSITIONDISABLED 0x80263001
@@ -141,6 +145,18 @@ BOOL SystemParametersInfoWNEW(UINT uiAction, UINT uiParam, PVOID pvParam, UINT f
 // For SWCA, so we can import our colorization configuration
 BOOL WINAPI SetWindowCompositionAttributeNEW(HWND hwnd, WINDOWCOMPOSITIONATTRIBDATA* pAttrData) // Ittr: re-organised again 25/10/24
 {
+	// Every accent write anywhere, so a second arming site cannot hide
+	if (pAttrData && pAttrData->Attrib == WCA_ACCENT_POLICY && pAttrData->pvData)
+	{
+		ACCENT_POLICY* ap = (ACCENT_POLICY*)pAttrData->pvData;
+		WCHAR szCls[64] = { 0 };
+		GetClassNameW(hwnd, szCls, 64);
+		dbgprintf(L"E7TRACE SWCA hwnd=%p cls=%s state=%d flags=%08X grad=%08X managed=%d tray=%d",
+			hwnd, szCls, (int)ap->AccentState, (unsigned)ap->AccentFlags,
+			(unsigned)ap->GradientColor, (int)IsWrapperManagedWindow(hwnd),
+			(int)(hwnd == GetTaskbarWnd()));
+	}
+
 	if ((IsClassicTheme() || !IsCompositionActive() || IsCompositionManuallyDisabled()) && IsWrapperManagedWindow(hwnd)) // we do funny things so explorer works properly for classic/basic.
 	{
 		int bNCRenderingEnabled = DWMNCRP_DISABLED;
@@ -154,6 +170,13 @@ BOOL WINAPI SetWindowCompositionAttributeNEW(HWND hwnd, WINDOWCOMPOSITIONATTRIBD
 		return SetWindowCompositionAttribute(hwnd, &attrData); //byebye
 	}
 
+	// Swap the shell accent for real dwm blur behind, see ShellAccentOverride.h
+	if (ShellAccentOverrideActive() && pAttrData && pAttrData->pvData
+		&& pAttrData->Attrib == WCA_ACCENT_POLICY && IsShellAccentWindow(hwnd))
+	{
+		return ApplyShellAccentPolicy(hwnd, pAttrData);
+	}
+
 	if (pAttrData->Attrib == WCA_DISALLOW_PEEK)
 	{
 		if (hwnd == GetTaskbarWnd() || hwnd == GetStartMenuWnd() || hwnd == GetThumbnailWnd())
@@ -161,7 +184,7 @@ BOOL WINAPI SetWindowCompositionAttributeNEW(HWND hwnd, WINDOWCOMPOSITIONATTRIBD
 			UpdateShellWindowAccent(hwnd, hwnd == GetThumbnailWnd());
 		}
 
-		if (!ShouldDisableShellWindowTransparency() && IsCompositionActive())
+		if (!ShouldDisableShellWindowTransparency() && IsCompositionActiveCached())
 		{
 			ForceActiveWindowAppearance(hwnd); // mainly for legacy but doesn't seem to harm anything by applying anyway
 		}
@@ -187,7 +210,8 @@ UINT WINAPI SetErrorModeNEW(UINT uMode)
 {
 	SetCurrentProcessExplicitAppUserModelID(L"Microsoft.Windows.Explorer");
 
-	if (s_EnableImmersiveShellStack == 1)
+	// The swapped Win11 Start needs the shell window owned first, defer Metro to ShimDesktop
+	if (s_EnableImmersiveShellStack == 1 && !IsSwapShell())
 		CreateTwinUI_UWP();
 
 	return SetErrorMode(uMode);
@@ -201,23 +225,20 @@ BOOL WINAPI IsCompositionActiveNEW()
 // Disable composition where appropriate
 HRESULT WINAPI DwmIsCompositionEnabledNEW(BOOL* pfEnabled)
 {
-	HRESULT hr;
+	// Milestone2 returns the failure code, explorer reads that as compact thumbnails
+	// Returning S_OK with FALSE makes it lay out a live preview it then cannot draw
+	if (IsCompositionManuallyDisabled())
+	{
+		return DWM_E_COMPOSITIONDISABLED;
+	}
+
 	if (DwmIsCompositionEnabledOrig)
 	{
-		hr = DwmIsCompositionEnabledOrig(pfEnabled);
-	}
-	else
-	{
-		static auto fn = reinterpret_cast<DwmIsCompositionEnabledAPI>(GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmIsCompositionEnabled"));
-		hr = fn ? fn(pfEnabled) : E_FAIL;
+		return DwmIsCompositionEnabledOrig(pfEnabled);
 	}
 
-	if (SUCCEEDED(hr) && pfEnabled && *pfEnabled && IsCompositionManuallyDisabled())
-	{
-		*pfEnabled = FALSE;
-	}
-
-	return hr;
+	static auto fn = reinterpret_cast<DwmIsCompositionEnabledAPI>(GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmIsCompositionEnabled"));
+	return fn ? fn(pfEnabled) : E_FAIL;
 }
 HRESULT WINAPI DwmExtendFrameIntoClientAreaNEW(HWND hwnd, const MARGINS* pMarInset)
 {
@@ -270,7 +291,9 @@ HRESULT WINAPI DwmEnableBlurBehindWindowNEW(HWND hwnd, DWM_BLURBEHIND* pBlurBehi
 		ForceActiveWindowAppearance(hwnd);
 	}
 
+	// The override wants this blur, so only squash it while the override is off
 	if ((hwnd == GetTaskbarWnd() || hwnd == GetStartMenuWnd() || hwnd == GetThumbnailWnd()) &&
+		!ShellAccentOverrideActive() &&
 		(pBlurBehind && (s_ColorizationOptions != 0 || ShouldDisableShellWindowTransparency())))
 	{
 		pBlurBehind->fEnable = 0;
@@ -520,6 +543,10 @@ void PatchStartupFolder()
 	char* execStartupEnumProc =
 		"48 89 5C 24 ?? 55 56 57 41 54 41 55 48 81 EC 80 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 ?? ?? ?? ?? 48 8B 01";
 	void* target = reinterpret_cast<void*>(FindPattern(reinterpret_cast<uintptr_t>(GetModuleHandle(NULL)), execStartupEnumProc));
+	if (!target)
+		target = reinterpret_cast<void*>(FindPattern(reinterpret_cast<uintptr_t>(GetModuleHandle(NULL)),
+			"48 8B C4 44 89 48 20 4C 89 40 18 48 89 50 10 48 89 48 08 55 53 56 57 41 54 41 55 41 56 48 8D A8 48 FC FF FF 48 81 EC 80 04 00 00"));
+
 	if (target)
 		MH_CreateHook(target, ExecStartupEnumProcNEW, reinterpret_cast<void**>(&ExecStartupEnumProcOrig));
 }
@@ -527,8 +554,13 @@ void PatchStartupFolder()
 
 void PatchProcessRun6432()
 {
+	// 7850 encodes the leading PUSH RBX as 40 53 instead of FF F3
 	char* processRun6432 = "FF F3 48 81 EC 80 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 ?? ?? ?? ?? B9 46 00 00 40";
 	void* target = reinterpret_cast<void*>(FindPattern(reinterpret_cast<uintptr_t>(GetModuleHandle(NULL)), processRun6432));
+	if (!target)
+		target = reinterpret_cast<void*>(FindPattern(reinterpret_cast<uintptr_t>(GetModuleHandle(NULL)),
+			"40 53 48 81 EC 80 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 ?? ?? ?? ?? B9 46 00 00 40"));
+
 	if (target)
 		MH_CreateHook(target, ProcessRun6432NEW, NULL);
 }
@@ -599,6 +631,9 @@ void PatchKernel32()
 {
 	// Change appid
 	ChangeImportedAddress(GetModuleHandle(NULL), "kernel32.dll", SetErrorMode, SetErrorModeNEW);
+
+	// First logon seeds the Windows 7 Ultimate programs list
+	InstallInitialMFU();
 }
 
 // Import address changes for uxtheme.dll modulename

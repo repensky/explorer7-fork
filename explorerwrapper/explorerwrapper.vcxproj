@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -113,7 +113,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>Netapi32.lib;shlwapi.lib;uxtheme.lib;dwmapi.lib;comctl32.lib;libMinHook.x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ole32.lib;windowscodecs.lib;msimg32.lib;wtsapi32.lib;secur32.lib;gdi32.lib;advapi32.lib;user32.lib;Netapi32.lib;shlwapi.lib;uxtheme.lib;dwmapi.lib;comctl32.lib;libMinHook.x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>comctl32.dll;shlwapi.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
@@ -178,7 +178,7 @@
       <Profile>false</Profile>
       <MapExports>true</MapExports>
       <TurnOffAssemblyGeneration>true</TurnOffAssemblyGeneration>
-      <AdditionalDependencies>Netapi32.lib;shlwapi.lib;uxtheme.lib;dwmapi.lib;comctl32.lib;libMinHook.x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ole32.lib;windowscodecs.lib;msimg32.lib;wtsapi32.lib;secur32.lib;gdi32.lib;advapi32.lib;user32.lib;Netapi32.lib;shlwapi.lib;uxtheme.lib;dwmapi.lib;comctl32.lib;libMinHook.x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>comctl32.dll;shlwapi.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <ProjectReference>
@@ -198,9 +198,13 @@
     <ClInclude Include="AugmentedShellFolder.h" />
     <ClInclude Include="AuthUI.h" />
     <ClInclude Include="AutoPlay.h" />
+    <ClInclude Include="DesktopIconRows.h" />
+    <ClInclude Include="SearchPrompt.h" />
+    <ClInclude Include="TooltipSafeZone.h" />
     <ClInclude Include="MinhookImports.h" />
     <ClInclude Include="PatternImports.h" />
     <ClInclude Include="RegTreeOptions.h" />
+    <ClInclude Include="ExplorerLauncher.h" />
     <ClInclude Include="dbgprint.h" />
     <ClInclude Include="DestinationList.h" />
     <ClInclude Include="EnumStartMenu.h" />
@@ -211,11 +215,13 @@
     <ClInclude Include="MinHook.h" />
     <ClInclude Include="NscTree.h" />
     <ClInclude Include="PinnedList.h" />
+    <ClInclude Include="InitialMFU.h" />
     <ClInclude Include="ProjectionFactory.h" />
     <ClInclude Include="RegistryManager.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="shell32_wrappers.h" />
     <ClInclude Include="StartMenuItemFilter.h" />
+    <ClInclude Include="ShellAccentOverride.h" />
     <ClInclude Include="ShellURL.h" />
     <ClInclude Include="StartMenuPin.h" />
     <ClInclude Include="StartMenuResolver.h" />
@@ -225,6 +231,8 @@
     <ClInclude Include="ThemeManager.h" />
     <ClInclude Include="trash.h" />
     <ClInclude Include="TrayNotify.h" />
+    <ClInclude Include="UserTile.h" />
+    <ClInclude Include="FlyoutFix.h" />
     <ClInclude Include="TypeDefinitions.h" />
     <ClInclude Include="UserAssist.h" />
     <ClInclude Include="OSVersion.h" />
@@ -238,7 +246,10 @@
     <ClCompile Include="OptionConfig.cpp" />
     <ClCompile Include="PatternImports.cpp" />
     <ClCompile Include="RegTreeOptions.cpp" />
+    <ClCompile Include="ExplorerLauncher.cpp" />
     <ClCompile Include="dbgprint.cpp" />
+    <ClCompile Include="PatternCache.cpp" />
+    <ClCompile Include="ThreadSnapshot.cpp" />
     <ClCompile Include="DestinationList.cpp" />
     <ClCompile Include="dllmain.cpp">
       <CompileAsManaged Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</CompileAsManaged>
@@ -261,6 +272,7 @@
       <WholeProgramOptimization Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</WholeProgramOptimization>
     </ClCompile>
     <ClCompile Include="PinnedList.cpp" />
+    <ClCompile Include="InitialMFU.cpp" />
     <ClCompile Include="ProjectionFactory.cpp" />
     <ClCompile Include="RegistryManager.cpp" />
     <ClCompile Include="shell32_wrappers.cpp" />
@@ -277,6 +289,9 @@
     <ClCompile Include="ShellTaskScheduler.cpp" />
     <ClCompile Include="ThemeManager.cpp" />
     <ClCompile Include="TrayNotify.cpp" />
+    <ClCompile Include="UserTile.cpp" />
+    <ClCompile Include="UserTileFlyout.cpp" />
+    <ClCompile Include="FlyoutFix.cpp" />
     <ClCompile Include="UserAssist.cpp" />
     <ClCompile Include="explorer_wrappers.cpp" />
     <ClCompile Include="OSVersion.cpp" />

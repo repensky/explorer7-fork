@@ -63,6 +63,7 @@ private:
 
 void CreateTwinUI();
 void CreateTwinUI_UWP();
+void StartWinKeyHook();
 DWORD WINAPI TwinThread( LPVOID lpParameter );
 
 interface IImmersiveShellHookService : IUnknown

@@ -9,8 +9,8 @@
 // Allow 7 msstyles to load by removing animation map data from uxtheme.dll imports
 void RemoveLoadAnimationDataMap();
 
-// Fix authui.dll import for CLogOffOptions by replacing bytes
-void FixAuthUI();
+// Stop uxtheme appending the immersive class for shell targets
+void RemoveGetClassIdForShellTarget();
 
 // Remove unwanted immersive shell interfaces, often by preventing them from running
 void DisableImmersiveStart();
@@ -25,6 +25,9 @@ void RevertFlyouts();
 
 // Forcefully enable a conditional check to allow SetWindowRgn to be applied at the right time
 void RepairRegionBehaviour();
+
+// Let pinned immersive items show a destination list when right clicked
+void FixDestinationListForImmersive();
 
 // Main procedure we call from elsewhere
 void ChangePatternImports();

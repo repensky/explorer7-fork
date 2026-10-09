@@ -1,5 +1,37 @@
 #include "dbgprint.h"
 
+// Mirror output to %TEMP%\explorer7.log so it can be read without DebugView
+// Opt in by creating that file, it is never created here
+static void dbglogW(LPCWSTR msg)
+{
+	WCHAR path[MAX_PATH];
+	DWORD n = GetTempPathW(ARRAYSIZE(path), path);
+	if (n == 0 || n > ARRAYSIZE(path) - 16)
+		return;
+
+	lstrcatW(path, L"explorer7.log");
+
+	HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (h == INVALID_HANDLE_VALUE)
+		return;
+
+	// Prefix the pid so several explorer instances can be told apart in one log
+	char buf[2048];
+	int pfx = wsprintfA(buf, "[%lu] ", GetCurrentProcessId());
+	// UTF-8 so the file reads cleanly in any editor
+	int cb = WideCharToMultiByte(CP_UTF8, 0, msg, -1, buf + pfx, sizeof(buf) - pfx - 2, nullptr, nullptr);
+	if (cb > 1)
+	{
+		int total = pfx + cb - 1;
+		buf[total++] = '\r';
+		buf[total++] = '\n';
+		DWORD written = 0;
+		WriteFile(h, buf, (DWORD)total, &written, nullptr);
+	}
+	CloseHandle(h);
+}
+
 void dbgvprintf(LPCWSTR format, void* _argp)
 {
 	WCHAR msg[1024];
@@ -7,6 +39,7 @@ void dbgvprintf(LPCWSTR format, void* _argp)
 	int cnt = wvsprintfW(msg, format, argp);
 
 	OutputDebugStringW(msg);
+	dbglogW(msg);
 }
 
 void dbgvprintfA(LPCSTR format, void* _argp)
@@ -61,30 +94,44 @@ BOOL WINAPI ChangeImportedAddress_FARPROC( HMODULE hModule, LPSTR modulename, FA
     pNTHeader = (PIMAGE_NT_HEADERS)( lpFileBase + dosHeader->e_lfanew );    
     pImportDir = (PIMAGE_IMPORT_DESCRIPTOR) ( lpFileBase + pNTHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress );
     
+    PIMAGE_IMPORT_DESCRIPTOR pFirstDir = pImportDir;
     while ( pImportDir->Name )
-    {		
+    {
 		name = (LPSTR) (lpFileBase + pImportDir->Name);
 
 		if ( lstrcmpiA( name, modulename ) == 0 ) break;
 
-        //auto toprint = concat(name, "\n");
-        //OutputDebugStringA(toprint);
-        //free(toprint);
-        //dbgprintf(L"Redirected in %s\n", modulename);
-
 		pImportDir++;
     }
-    if ( !pImportDir->Name ) return FALSE;
-    
-    pFunctions = (DWORD_PTR*)(lpFileBase + pImportDir->FirstThunk);
-    
-    while ( *pFunctions )
+
+    pFunctions = NULL;
+    if ( pImportDir->Name )
     {
-		if ( *pFunctions == (DWORD_PTR)origfunc ) break;
-		pFunctions++;
+        pFunctions = (DWORD_PTR*)(lpFileBase + pImportDir->FirstThunk);
+        while ( *pFunctions )
+        {
+            if ( *pFunctions == (DWORD_PTR)origfunc ) break;
+            pFunctions++;
+        }
+        if ( !*pFunctions ) pFunctions = NULL;
     }
-    if ( !*pFunctions ) return FALSE;
-    
+
+    // Newer builds pull user32 through an api set name, so the thunk is looked for everywhere
+    // The loader already resolved it, the slot holds the same address whatever the descriptor says
+    if ( !pFunctions )
+    {
+        for ( pImportDir = pFirstDir; pImportDir->Name && !pFunctions; pImportDir++ )
+        {
+            DWORD_PTR* pThunk = (DWORD_PTR*)(lpFileBase + pImportDir->FirstThunk);
+            while ( *pThunk )
+            {
+                if ( *pThunk == (DWORD_PTR)origfunc ) { pFunctions = pThunk; break; }
+                pThunk++;
+            }
+        }
+    }
+    if ( !pFunctions ) return FALSE;
+
 	VirtualProtect( pFunctions, sizeof(DWORD_PTR), PAGE_EXECUTE_READWRITE, &oldpr );
 	*pFunctions = (DWORD_PTR)newfunc;
 	VirtualProtect( pFunctions, sizeof(DWORD_PTR), oldpr, &oldpr );
@@ -111,13 +158,6 @@ BOOL WINAPI ChangeImportedAddress_ORDINAL(HMODULE hModule, LPSTR modulename, ULO
     {
         name = (LPSTR)(lpFileBase + pImportDir->Name);
         if (!name) continue;
-        //auto toprint = concat(name, "\n");
-        //if (toprint)
-        //{
-        //    //OutputDebugStringA(toprint);
-        //    //free(toprint);
-        //}
-    
         if (lstrcmpiA(name, modulename) == 0) break;
     
         
@@ -144,22 +184,11 @@ BOOL WINAPI ChangeImportedAddress_ORDINAL(HMODULE hModule, LPSTR modulename, ULO
                 VirtualProtect(pFunc, sizeof(DWORD_PTR), oldpr, &oldpr);
                // OutputDebugStringA("Good\n");
             }
-            //dbgprintf(L"ordinal %i\n", originalThunk->u1.Ordinal);
-            // Import by Ordinal
-            //std::cout << "  Ordinal: " << (originalThunk->u1.Ordinal & 0xFFFF) << std::endl;
         }
-        //else {
-        //    // Import by Name
-        //    PIMAGE_IMPORT_BY_NAME importByName = (PIMAGE_IMPORT_BY_NAME)(lpFileBase + originalThunk->u1.AddressOfData);
-        //    std::cout << "  Function: " << importByName->Name << std::endl;
-        //}
         thunk++;
         originalThunk++;
     }
 
-    //VirtualProtect(pFunctions, sizeof(DWORD_PTR), PAGE_EXECUTE_READWRITE, &oldpr);
-    //*pFunctions = (DWORD_PTR)newfunc;
-    //VirtualProtect(pFunctions, sizeof(DWORD_PTR), oldpr, &oldpr);
     return FALSE;
 }
 

@@ -7,6 +7,7 @@
 #include "MinHook.h"
 #include "KnownFolders.h"
 #include "RegistryManager.h"
+#include "PinnedList.h"
 
 typedef PVOID (WINAPI *ResolveDelayLoadedAPIAPI)(PVOID ParentModuleBase, PVOID DelayloadDescriptor, PVOID FailureDllHook, PVOID FailureSystemHook,PIMAGE_THUNK_DATA ThunkAddress,ULONG Flags);
 static ResolveDelayLoadedAPIAPI ResolveDelayLoadedAPI;
@@ -56,7 +57,6 @@ PVOID WINAPI ResolveDelayLoadedAPINEW(PVOID ParentModuleBase, PVOID DelayloadDes
 
 BOOL __stdcall ILIsEqualNEW(LPCITEMIDLIST pidl1, LPCITEMIDLIST pidl2)
 {
-	dbgprintf(L"ILIsEqualNEW\n");
 	IShellFolder* ppshf = 0;
 	HRESULT v4 = SHGetDesktopFolder(&ppshf);
 	if (v4 >= 0)
@@ -72,6 +72,24 @@ HRESULT __stdcall SHEvaluateSystemCommandTemplateNEW(PCWSTR pszCmdTemplate, PWST
 	dbgprintf(L"SHEvaluateSystemCommandTemplateNEW\n");
 	return S_OK;
 	//return SHEvaluateSystemCommandTemplateWithOptions((unsigned __int16*)pszCmdTemplate, ppszParameters);
+}
+
+// CPinnedList::_TogglePinned, this is the CPinnedList base, offsets read off the 26100 body
+// Pinned flag at 0x58, the item pidl at 0x60, the IPinnedList3 subobject at 0x18
+typedef HRESULT(__fastcall* TogglePinned_t)(void* pThis, int caller);
+static TogglePinned_t TogglePinned_orig;
+
+static HRESULT __fastcall TogglePinned_hook(void* pThis, int caller)
+{
+	// Already pinned means unpin, and that still works through Modify with a null second pidl
+	if (*(int*)((BYTE*)pThis + 0x58) != 0)
+		return TogglePinned_orig(pThis, caller);
+
+	IPinnedList3* list = (IPinnedList3*)((BYTE*)pThis + 0x18);
+	PCIDLIST_ABSOLUTE pidl = *(PCIDLIST_ABSOLUTE*)((BYTE*)pThis + 0x60);
+	HRESULT hr = PinNewItemViaShellLink(list, pidl);
+	dbgprintf(L"TogglePinned pin new via shortcut route, caller %d hr=%08X", caller, hr);
+	return hr;
 }
 
 HRESULT(__stdcall* Shell32_DllGetClassObject)(REFCLSID rclsid, const IID* const riid, LPVOID* ppv);
@@ -91,20 +109,15 @@ void HookShell32()
 {
 	HMODULE shell32 = LoadLibrary(L"shell32.dll");
 
-	dbgprintf(L"1\n");
 	ResolveDelayLoadedAPI = (ResolveDelayLoadedAPIAPI)GetProcAddress(GetModuleHandle(L"kernel32.dll"),"ResolveDelayLoadedAPI");
 	ChangeImportedAddress(GetModuleHandle(L"shell32.dll"), "API-MS-WIN-CORE-DELAYLOAD-L1-1-1.DLL", ResolveDelayLoadedAPI, ResolveDelayLoadedAPINEW);
 	//ResolveDelayLoadedAPI = (ResolveDelayLoadedAPIAPI)GetProcAddress(GetModuleHandle(L"api-ms-win-core-delayload-l1-1-1.dll"),"ResolveDelayLoadedAPI");
-	dbgprintf(L"%i\n",(unsigned long long)ResolveDelayLoadedAPI);
-	dbgprintf(L"2\n");
 	CoCreateInstanceBase = GetProcAddress(GetModuleHandle(L"combase.dll"),"CoCreateInstance");
 	Shell32_DllGetClassObject = (decltype(Shell32_DllGetClassObject))GetProcAddress(GetModuleHandle(L"shell32.dll"),"DllGetClassObject");
 	MH_CreateHook(Shell32_DllGetClassObject, Shell32_DllGetClassObject_Hook,(LPVOID*)&Shell32_DllGetClassObject);
-	dbgprintf(L"3\n");
 
 	SHGetValueWSHCore = GetProcAddress(LoadLibrary(L"shcore.dll"),"SHGetValueW");
 
-	dbgprintf(L"5\n");
 	//auto ordinal902 = GetProcAddress(LoadLibrary(L"shell32.dll"),(LPSTR)902);
 	//ChangeImportedAddress(LoadLibrary(L"shell32.dll"),"shlwapi.DLL", GetProcAddress(LoadLibrary(L"shlwapi.dll"), "SHAboutInfo"), SHAboutInfoWNEW);
 	ChangeImportedAddress(GetModuleHandle(0),"shell32.DLL", GetProcAddress(shell32, (LPSTR)902), IsSearchEnabledNEW);
@@ -114,41 +127,52 @@ void HookShell32()
 	//todo: evaluate if this is needed
 	ChangeImportedAddress(GetModuleHandle(0),"shell32.DLL", GetProcAddress(shell32, "ILIsEqual"), ILIsEqualNEW);
 
-	uintptr_t Win32PinCheck = FindPattern((uintptr_t)shell32, "41 8B E9 49 8B F0 48 8B DA 48 8B F9 48 8D 0D ?? ?? ?? ?? E8");
+	// CPinnedList::Modify asks a WIL feature gate before it hands pinning to the immersive pin manager
+	// The call after the lea is that gate, and it is made to answer no so the registry stream path runs
 	if (g_osVersion.BuildNumber() >= 19041)
 	{
-		if (Win32PinCheck)
+		static const char* c_pinGateSites[] =
 		{
-			dbgprintf(L"Win32PinCheck %i", Win32PinCheck);
-			Win32PinCheck += 19;
-			uint8_t* bytes = (uint8_t*)(Win32PinCheck + 5 + *reinterpret_cast<int32_t*>(Win32PinCheck + 1));
+			// 19041 to early 23H2, Feature_W32PTP
+			"41 8B E9 49 8B F0 48 8B DA 48 8B F9 48 8D 0D ?? ?? ?? ?? E8",
+			// Later 23H2 updates
+			"45 8B F1 49 8B F0 48 8B DA 48 8B F9 48 8D 0D ?? ?? ?? ?? E8",
+			// 24H2, Feature_W32PTU, see notes/24h2-support.md
+			"45 8B F1 49 8B F8 48 8B F2 48 8B D9 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 0F 84",
+		};
+
+		for (int i = 0; i < ARRAYSIZE(c_pinGateSites); i++)
+		{
+			uintptr_t Win32PinCheck = FindPattern((uintptr_t)shell32, c_pinGateSites[i]);
+			if (!Win32PinCheck)
+				continue;
+
+			dbgprintf(L"Win32PinCheck site %d at %p", i, (void*)Win32PinCheck);
+			uintptr_t gateCall = Win32PinCheck + 19;
+			uint8_t* bytes = (uint8_t*)(gateCall + 5 + *reinterpret_cast<int32_t*>(gateCall + 1));
 			DWORD old;
 			VirtualProtect(bytes, 3, PAGE_EXECUTE_READWRITE, &old);
-			bytes[0] = 0xB0;
-			bytes[1] = 0x00;
+			bytes[0] = 0x33;
+			bytes[1] = 0xC0;
 			bytes[2] = 0xC3;
 			VirtualProtect(bytes, 3, old, 0);
-		}
-		else // Microsoft added a new signature for this in later 23H2 updates
-		{
-			uintptr_t Win32PinCheck2 = FindPattern((uintptr_t)shell32, "45 8B F1 49 8B F0 48 8B DA 48 8B F9 48 8D 0D ?? ?? ?? ?? E8");
 
-			if (Win32PinCheck2)
-			{
-				dbgprintf(L"Win32PinCheck2 %i", Win32PinCheck2);
-				Win32PinCheck2 += 19;
-				uint8_t* bytes = (uint8_t*)(Win32PinCheck2 + 5 + *reinterpret_cast<int32_t*>(Win32PinCheck2 + 1));
-				DWORD old;
-				VirtualProtect(bytes, 3, PAGE_EXECUTE_READWRITE, &old);
-				bytes[0] = 0xB0;
-				bytes[1] = 0x00;
-				bytes[2] = 0xC3;
-				VirtualProtect(bytes, 3, old, 0);
-			}
+			break;
 		}
 	}
-	
-	dbgprintf(L"6\n");
+
+	// 26100 sends every new pin from the verbs to an immersive pin manager whose shim is a stub
+	// The toggle is taken over so a new pin goes in through the shortcut route instead
+	if (g_osVersion.BuildNumber() >= 26100)
+	{
+		void* toggle = (void*)FindPattern((uintptr_t)shell32,
+			"48 89 5C 24 18 55 56 57 48 83 EC 50 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 40 8B EA 48 8B F1 83 79 58 00 0F 85 ?? ?? ?? ?? 48 83 64 24 38 00");
+		if (toggle)
+		{
+			MH_STATUS st = MH_CreateHook(toggle, TogglePinned_hook, (LPVOID*)&TogglePinned_orig);
+			dbgprintf(L"CPinnedList::_TogglePinned at %p hooked, status %d", toggle, (int)st);
+		}
+	}
 }
 
 HRESULT BindToDesktop(LPCITEMIDLIST pidl, IShellFolder** ppsfResult)

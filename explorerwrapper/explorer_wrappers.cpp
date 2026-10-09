@@ -1,8 +1,35 @@
 #include "common.h"
+#include "dbgprint.h"
 
 extern "C" DWORD WINAPI SHGetSignature(DWORD p1, DWORD p2, DWORD p3)
 {
 	return E_NOTIMPL;
+}
+
+// Build 7850 imports this from TWINAPI, Windows 10 dropped it
+// Same shape as user32 GetWindowBand, window in RCX and the band out in RDX
+extern "C" BOOL WINAPI EmulateGetWindowBand(HWND hwnd, DWORD* pdwBand)
+{
+	static BOOL(WINAPI* fn)(HWND, DWORD*) = nullptr;
+	if (!fn)
+	{
+		HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+		if (hUser32)
+			fn = (BOOL(WINAPI*)(HWND, DWORD*))GetProcAddress(hUser32, "GetWindowBand");
+		if (!fn)
+			return FALSE;
+	}
+	if (!fn(hwnd, pdwBand))
+		return FALSE;
+
+	// CTaskBand indexes a fifteen entry table with this and traps on anything else
+	if (pdwBand && (LONG)*pdwBand >= 15)
+	{
+		dbgprintf(L"EmulateGetWindowBand %p is in band %d, reporting 0", hwnd, (int)*pdwBand);
+		*pdwBand = 0;
+	}
+
+	return TRUE;
 }
 
 extern "C" DWORD WINAPI InitProcessPriv(DWORD unk1, HMODULE hInst, DWORD unk2, DWORD unk3)

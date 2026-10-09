@@ -40,6 +40,24 @@ HRESULT WINAPI UAQueryShortcut(LPITEMIDLIST pidl, PUEMINFO uem)
 	return result;
 }
 
+HRESULT WINAPI UAQueryApp(LPCWSTR appId, PUEMINFO uem)
+{
+	uem->cbSize = sizeof(UEMINFO);
+	uem->dwMask = 0x31;
+	return UAQueryEntry(UAIID_APPLICATIONS, (LPWSTR)appId, uem);
+}
+
+// Windows 7 ranks the list by app id usage alone, read from shell32 7601 s_CombineUAInfoCB
+BOOL WINAPI UAQueryMFUUsage(LPITEMIDLIST pidl, LPCWSTR appId, PUEMINFO uem)
+{
+	HRESULT hr = appId ? UAQueryApp(appId, uem) : E_INVALIDARG;
+
+	// Only an item without an app id falls back to the usage of the shortcut itself
+	if (FAILED(hr))
+		hr = UAQueryShortcut(pidl, uem);
+	return SUCCEEDED(hr) && uem->R && !uem->fExcludeFromMFU;
+}
+
 LPWSTR WINAPI CoAllocString(LPWSTR src)
 {	
 	LPWSTR dst = (LPWSTR)CoTaskMemAlloc(((lstrlenW(src)+1)*sizeof(WCHAR)));

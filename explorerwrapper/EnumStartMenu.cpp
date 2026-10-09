@@ -15,8 +15,7 @@ CEnumStartMenu::CEnumStartMenu()
 	m_enumidx = 0;
 	m_count = 0;
 	m_limit = 1000;
-	hArrItems = DSA_Create(sizeof(STARTMENUITEM),4);	
-	dbgprintf(L"CEnumStartMenu::CEnumStartMenu\n");
+	hArrItems = DSA_Create(sizeof(STARTMENUITEM),4);
 }
 
 CEnumStartMenu::~CEnumStartMenu()
@@ -47,7 +46,6 @@ ULONG STDMETHODCALLTYPE CEnumStartMenu::Release(void)
 
 HRESULT STDMETHODCALLTYPE CEnumStartMenu::Clone(IEnumStartMenuItem **ppenum)
 {
-	dbgprintf(L"CEnumStartMenu::Clone\n");
 	return E_NOTIMPL;
 }
 
@@ -61,8 +59,6 @@ HRESULT STDMETHODCALLTYPE CEnumStartMenu::Next(ULONG celt,PSTARTMENUITEM rgelt,U
 		return S_FALSE;
 	}
 	DSA_GetItem(hArrItems,m_enumidx,rgelt);
-	dbgprintf(L"Pos %d R %X FT %X_%X Item %s",rgelt->iPinPos,rgelt->ueminfo.R,
-		rgelt->ueminfo.ftExecute.dwHighDateTime,rgelt->ueminfo.ftExecute.dwLowDateTime,rgelt->pszAppID);
 	m_enumidx++;
 	if (pceltFetched) *pceltFetched = 1;
 	return S_OK;
@@ -70,14 +66,12 @@ HRESULT STDMETHODCALLTYPE CEnumStartMenu::Next(ULONG celt,PSTARTMENUITEM rgelt,U
 
 HRESULT STDMETHODCALLTYPE CEnumStartMenu::Reset()
 {
-	dbgprintf(L"CEnumStartMenu::Reset\n");
 	m_enumidx = 0;
 	return E_NOTIMPL;
 }
 
 HRESULT STDMETHODCALLTYPE CEnumStartMenu::Skip(ULONG celt)
 {
-	dbgprintf(L"CEnumStartMenu::Skip\n");
 	return E_NOTIMPL;
 }
 

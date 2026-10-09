@@ -9,7 +9,6 @@ HRESULT __stdcall CShellTaskSchedulerWrapper::QueryInterface(REFIID riid, void**
         HRESULT res = m_TaskScheduler->QueryInterface(IID_IShellTaskSchedulerSettings8,(void**)&taskSettings);
         if (res == S_OK)
         {
-            dbgprintf(L"CShellTaskSchedulerWrapper::QueryInterface S_OK!!\n");
             *ppvObject = new CShellTaskSchedulerSettingsWrapper(taskSettings);
             return res;
         }

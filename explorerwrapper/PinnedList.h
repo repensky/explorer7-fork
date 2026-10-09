@@ -26,6 +26,8 @@ public:
 	STDMETHOD(GetAppIDForPinnedItem)(PCIDLIST_ABSOLUTE, PWSTR*) PURE;
 	STDMETHOD(ItemChangeNotify)(PCIDLIST_ABSOLUTE, PCIDLIST_ABSOLUTE) PURE;
 	STDMETHOD(UpdateForRemovedItemsAsNecessary)(VOID) PURE;
+	// Slot 14, only 7850's PinInitialItems calls it, on a profile's first logon
+	STDMETHOD(GetPinnedItemForAppID)(PCWSTR, PIDLIST_ABSOLUTE*) PURE;
 };
 
 MIDL_INTERFACE("446bc432-57e9-4b72-8ef1-af27113dcf9c")
@@ -60,7 +62,7 @@ public:
 	STDMETHOD(GetAppIDForPinnedItem)(PCIDLIST_ABSOLUTE, PWSTR*) PURE;
 	STDMETHOD(ItemChangeNotify)(PCIDLIST_ABSOLUTE, PCIDLIST_ABSOLUTE) PURE;
 	STDMETHOD(UpdateForRemovedItemsAsNecessary)(VOID) PURE;
-	STDMETHOD(GetPinnedItemForAppID)(PWSTR, PCIDLIST_ABSOLUTE) PURE;
+	STDMETHOD(GetPinnedItemForAppID)(PCWSTR, PIDLIST_ABSOLUTE*) PURE;
 	STDMETHOD(ApplyInPlaceTaskbarLayout)(int, int) PURE;
 	STDMETHOD(ApplyReorderTaskbarLayout)(int, int) PURE;
 };
@@ -74,7 +76,8 @@ public:
 	STDMETHOD(GetPinnableInfo)(IDataObject*, int, IShellItem2**, IShellItem**, PWSTR*, INT*) PURE;
 	STDMETHOD(IsPinnable)(IDataObject*, int) PURE;
 	STDMETHOD(Resolve)(HWND, ULONG, PCIDLIST_ABSOLUTE, PIDLIST_ABSOLUTE*) PURE;
-	STDMETHOD(Unadvise)(ULONG) PURE;
+	// 26100 symbols name slot 7 CPinnedList::LegacyModify
+	STDMETHOD(LegacyModify)(PCIDLIST_ABSOLUTE, PCIDLIST_ABSOLUTE) PURE;
 	STDMETHOD(GetChangeCount)(ULONG*) PURE;
 	STDMETHOD(IsPinned)(PCIDLIST_ABSOLUTE) PURE;
 	STDMETHOD(GetPinnedItem)(PCIDLIST_ABSOLUTE, PIDLIST_ABSOLUTE*) PURE;
@@ -82,7 +85,7 @@ public:
 	STDMETHOD(ItemChangeNotify)(PCIDLIST_ABSOLUTE, PCIDLIST_ABSOLUTE) PURE;
 	STDMETHOD(UpdateForRemovedItemsAsNecessary)(VOID) PURE;
 	STDMETHOD(PinShellLink)(PWSTR, IShellLinkW*) PURE;
-	STDMETHOD(GetPinnedItemForAppID)(PWSTR, PCIDLIST_ABSOLUTE) PURE;
+	STDMETHOD(GetPinnedItemForAppID)(PCWSTR, PIDLIST_ABSOLUTE*) PURE;
 	STDMETHOD(Modify)(PCIDLIST_ABSOLUTE, PCIDLIST_ABSOLUTE, int) PURE;
 };
 
@@ -153,6 +156,9 @@ IPinManagerInterop2 : IPinManagerInterop
 	virtual HRESULT STDMETHODCALLTYPE UpdatePinnedTaskbarItem(PCUIDLIST_ABSOLUTE, PCUIDLIST_ABSOLUTE, PINNEDLISTMODIFYCALLER) = 0;
 };
 
+// Adds a pin the way 26100 still allows, see notes/24h2-support.md
+HRESULT PinNewItemViaShellLink(IPinnedList3* list, PCIDLIST_ABSOLUTE pidl);
+
 class CPinnedListWrapper : public IPinnedList2
 {
 public:
@@ -176,6 +182,7 @@ public:
 	STDMETHODIMP GetAppIDForPinnedItem(PCIDLIST_ABSOLUTE, PWSTR*);
 	STDMETHODIMP ItemChangeNotify(PCIDLIST_ABSOLUTE, PCIDLIST_ABSOLUTE);
 	STDMETHODIMP UpdateForRemovedItemsAsNecessary(VOID);
+	STDMETHODIMP GetPinnedItemForAppID(PCWSTR, PIDLIST_ABSOLUTE*);
 private:
 	IFlexibleTaskbarPinnedList* m_flexList = 0;
 	IPinnedList3* m_pinnedList3 = 0;

@@ -15,6 +15,7 @@ DWORD g_dwTrayThreadId = 0;
 
 static WNDPROC g_prevTrayProc;
 static WNDPROC g_prevThumbnailProc;
+static WNDPROC g_prevDesktopProc;
 typedef DWORD(WINAPI* SHPtrParamAPI)(PVOID);
 typedef PVOID(WINAPI* SHCreateDesktopAPI)(PVOID);
 
@@ -228,14 +229,15 @@ static LRESULT RegSetDWORD(HKEY key, LPWSTR subkey, LPWSTR value, DWORD* dwVal)
 	return SHSetValueW(key, subkey, value, REG_DWORD, dwVal, 4);
 }
 
+// The byte count is the text plus its terminator, the old count read past the end of the string
 static LRESULT RegSetSZ(HKEY key, LPWSTR subkey, LPWSTR value, DWORD* dwVal)
 {
-	return SHSetValueW(key, subkey, value, REG_SZ, dwVal, (DWORD)wcslen((wchar_t*)dwVal) * sizeof(dwVal[0]));
+	return SHSetValueW(key, subkey, value, REG_SZ, dwVal, (DWORD)(wcslen((wchar_t*)dwVal) + 1) * sizeof(wchar_t));
 }
 
 static LRESULT RegSetExpandSZ(HKEY key, LPWSTR subkey, LPWSTR value, DWORD* dwVal)
 {
-	return SHSetValueW(key, subkey, value, REG_EXPAND_SZ, dwVal, 2 * ((DWORD)wcslen((wchar_t*)dwVal) * sizeof(dwVal[0])));
+	return SHSetValueW(key, subkey, value, REG_EXPAND_SZ, dwVal, (DWORD)(wcslen((wchar_t*)dwVal) + 1) * sizeof(wchar_t));
 }
 
 typedef struct {

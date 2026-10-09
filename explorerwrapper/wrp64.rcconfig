@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<localization>
+  <resources>
+    <win32Resources fileType="Dll">
+      <neutralResources>
+        <resourceType
+           typeNameId="#16"
+        />
+      </neutralResources>
+      <localizedResources>
+         <resourceType
+                typeNameId="#6"
+         />
+         <resourceType
+                typeNameId="#16"
+         />
+      </localizedResources>
+    </win32Resources>
+  </resources>
+</localization>

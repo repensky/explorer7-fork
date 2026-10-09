@@ -20,6 +20,13 @@ These issues, unless specified to have been resolved in a later Windows version,
 - The taskbar might overlap fullscreen applications whilst immersive shell is enabled (1507+).
 - If a user has StartIsBack++ installed, it may attempt to erroneously hook the shell, causing both visual and functional issues.
 
+**Windows 11 24H2 (26100)**
+- Every OS side hook was re-derived against the 26100 binaries, see `notes/24h2-support.md` for the full table.
+- The Win+X menu does nothing, the twinui.pcshell entry point that used to draw it is a stub on this build.
+- The Windows 7 style network flyout has nothing to attach to, 24H2 ships neither `pnidui.dll` nor `VAN.dll`.
+- 22H2 and 23H2 were not re-checked and keep the code paths they had.
+- Running the Windows 7 explorer.exe from its own folder rather than as `%SystemRoot%\explorer.exe` used to hide the pin verbs and swallow new taskbar pins, both are now handled.
+
 **Windows 7 limitations/bugs**
 
 All of the following are bugs or limitations within Windows 7's explorer itself, and will not be accounted for:
@@ -131,6 +138,8 @@ These options are located under `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\Cu
 | OverrideAlpha | REG_DWORD | When set to 1, colorization alpha specified by DWM is overridden on the taskbar, start menu, and thumbnails. | **0** |
 | AlphaValue | REG_DWORD | For use alongside OverrideAlpha, to specify a 2-digit hex code for the colorization system to use. | **0x6B** |
 | UseTaskbarPinning | REG_DWORD | Determines whether taskbar pinning functionality is available to the user. When set to 0, pins will not be loaded and cannot be modified from jumplists. | **1** |
+| ShellUIAccentOverride | REG_DWORD | Gives the taskbar, start menu and taskbar thumbnails real DWM blur behind instead of a Windows 10 accent fill, which is what Windows 7 actually did. This takes those three windows away from `ColorizationOptions`, so the two are not meant to be combined; set this to 0 to hand them back. Has no effect under Classic, high contrast, or with composition off. | **1** |
+| Win7DesktopIconRows | REG_DWORD | Spaces the desktop icon rows the way Windows 7 did. Windows 7 shared all of the space left at the bottom of the desktop between the rows, Windows 10 and 11 only share what is left beyond 30 percent of a row, so their rows sit a few pixels tighter. One row height covers every display, so with several displays this picks which one it is fitted to: **1** fits the main display, like single monitor Windows 7, and another display may fit one row fewer than it would otherwise; **2** fits the display at the top left of the whole desktop, which is the rule Windows 7 itself used; **0** keeps the stock rows. Applies with **Align icons to grid** on. Matched by byte pattern on Windows 10 19041 and Windows 11 26100 only, other builds keep the stock rows. Read at startup, restart Explorer after changing it. | **1** |
 
 ## Theme support
 
@@ -214,7 +223,7 @@ We're working based on a series of development milestones. Here's the planned de
 | -------- | --------- | ------ |
 | Milestone 1 | Initial release focused on stability for Windows 8.1, and providing a starting point for Windows 10 support. |  |
 | Milestone 2 | - Achieving stability for Windows 10 and 11 (up to and including 23H2) <br> - Ensuring that behaviour on Windows 8.1 perfectly matches its predecessor. <br> - Providing more visually accurate interfaces (e.g. program list) <br> - Supporting older .msstyles <br> - Introducing immersive shell support <br> - Custom orb support | ✅ Completed |
-| Milestone 3 | Solving persistent bugs remaining on Windows 10 and 11. Likely to focus more on fixes and adjustments than new features. | ⏳ Work in progress |
+| Milestone 3 | Solving persistent bugs remaining on Windows 10 and 11. Likely to focus more on fixes and adjustments than new features. Windows 11 24H2 (26100) is now on the supported list. | ⏳ Work in progress |
 
 While this project is aimed at restoring Windows 7 explorer.exe functionality, some older explorer versions have been found to work with the wrapper. In the future, we plan to support some of these directly.  Here's the chart
 for support:

@@ -69,6 +69,9 @@
     <ClInclude Include="PinnedList.h">
       <Filter>Header files</Filter>
     </ClInclude>
+    <ClInclude Include="InitialMFU.h">
+      <Filter>Header files</Filter>
+    </ClInclude>
     <ClInclude Include="ThemeManager.h">
       <Filter>Header files</Filter>
     </ClInclude>
@@ -93,6 +96,9 @@
     <ClInclude Include="RegTreeOptions.h">
       <Filter>Header files</Filter>
     </ClInclude>
+    <ClInclude Include="ExplorerLauncher.h">
+      <Filter>Header files</Filter>
+    </ClInclude>
     <ClInclude Include="common.h">
       <Filter>Header files</Filter>
     </ClInclude>
@@ -106,6 +112,9 @@
       <Filter>Header files</Filter>
     </ClInclude>
     <ClInclude Include="ShellURL.h">
+      <Filter>Header files</Filter>
+    </ClInclude>
+    <ClInclude Include="ShellAccentOverride.h">
       <Filter>Header files</Filter>
     </ClInclude>
     <ClInclude Include="OptionConfig.h">
@@ -132,6 +141,12 @@
       <Filter>Source code files</Filter>
     </ClCompile>
     <ClCompile Include="dbgprint.cpp">
+      <Filter>Source code files</Filter>
+    </ClCompile>
+    <ClCompile Include="PatternCache.cpp">
+      <Filter>Source code files</Filter>
+    </ClCompile>
+    <ClCompile Include="ThreadSnapshot.cpp">
       <Filter>Source code files</Filter>
     </ClCompile>
     <ClCompile Include="StartMenuResolver.cpp">
@@ -182,6 +197,9 @@
     <ClCompile Include="PinnedList.cpp">
       <Filter>Source code files</Filter>
     </ClCompile>
+    <ClCompile Include="InitialMFU.cpp">
+      <Filter>Source code files</Filter>
+    </ClCompile>
     <ClCompile Include="ThemeManager.cpp">
       <Filter>Source code files</Filter>
     </ClCompile>
@@ -198,6 +216,9 @@
       <Filter>Source code files</Filter>
     </ClCompile>
     <ClCompile Include="RegTreeOptions.cpp">
+      <Filter>Source code files</Filter>
+    </ClCompile>
+    <ClCompile Include="ExplorerLauncher.cpp">
       <Filter>Source code files</Filter>
     </ClCompile>
     <ClCompile Include="StartMenuItemFilter.cpp">

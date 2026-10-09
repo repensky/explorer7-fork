@@ -155,42 +155,26 @@ static wiktorArray<int>* patternToByte(const char* pattern)
 	return bytes;
 }
 
+// One scan, started past an earlier hit so every copy of a pattern can be found
+// Answered from the cache file beside wrp64.dll when the builds still match
+uintptr_t FindPatternCached(uintptr_t baseAddress, const char* signature, uintptr_t startAfter);
+
+// Misses are only cached between these two, while DllMain attaches
+void PatternCacheBeginAttach();
+void PatternCacheEndAttach();
+
+// Points MinHook's toolhelp imports at a list of this process's own threads
+void InstallOwnThreadSnapshot();
+
 static uintptr_t FindPattern(uintptr_t baseAddress, const char* signature)
 {
-	const auto dosHeader = (PIMAGE_DOS_HEADER)baseAddress;
-	const auto ntHeaders = (PIMAGE_NT_HEADERS)((unsigned char*)baseAddress + dosHeader->e_lfanew);
+	return FindPatternCached(baseAddress, signature, 0);
+}
 
-	const auto sizeOfImage = ntHeaders->OptionalHeader.SizeOfImage;
-	auto patternBytes = patternToByte(signature);
-	const auto scanBytes = reinterpret_cast<unsigned char*>(baseAddress);
-
-	const auto s = patternBytes->size;
-	const auto d = patternBytes->data;
-
-	for (size_t i = 0; i < sizeOfImage - s; ++i)
-	{
-		bool found = true;
-		for (size_t j = 0; j < s; ++j)
-		{
-			if (scanBytes[i + j] != d[j] && d[j] != -1)
-			{
-				found = false;
-				break;
-			}
-		}
-
-		if (found)
-		{
-			uintptr_t address = reinterpret_cast<uintptr_t>(&scanBytes[i]);
-
-			delete patternBytes;
-			return address;
-		}
-	}
-
-	delete patternBytes;
-
-	return NULL;
+// The next copy of a pattern after a hit already handled
+static uintptr_t FindPatternAfter(uintptr_t baseAddress, const char* signature, uintptr_t previousHit)
+{
+	return FindPatternCached(baseAddress, signature, previousHit);
 }
 
 //allocates memory close enough to the provided targetAddr argument to be reachable

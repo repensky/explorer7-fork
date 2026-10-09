@@ -45,6 +45,51 @@ public:
 	STDMETHOD(GetChoiceDesc)(ULONG choice, LPWSTR descBuffer, UINT bufferSize) PURE;
 };
 
+// Win7 authui.dll IShutdownChoiceListener, slot order read from 6.1.7601.17514
+// Windows 10 shutdownux.dll has no listener, so the wrapper supplies its own
+struct DECLSPEC_NOVTABLE IShutdownChoiceListener7: public IUnknown
+{
+	STDMETHOD(SetNotifyWnd)(HWND hwnd, UINT id) PURE;
+	STDMETHOD(GetMessageWnd)(HWND* phwnd) PURE;
+	STDMETHOD(ScanForPassiveChanges)(void) PURE;
+	STDMETHOD(StartListening)(void) PURE;
+	STDMETHOD(StopListening)(void) PURE;
+};
+
+// Tells the start menu logoff pane when the shutdown choices may have changed
+class CShutdownChoiceListener: public IShutdownChoiceListener7
+{
+public:
+	CShutdownChoiceListener();
+	~CShutdownChoiceListener();
+
+	//IUnknown
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject);
+	STDMETHODIMP_(ULONG) AddRef(void);
+	STDMETHODIMP_(ULONG) Release(void);
+
+	//IShutdownChoiceListener
+	STDMETHODIMP SetNotifyWnd(HWND hwnd, UINT id);
+	STDMETHODIMP GetMessageWnd(HWND* phwnd);
+	STDMETHODIMP ScanForPassiveChanges(void);
+	STDMETHODIMP StartListening(void);
+	STDMETHODIMP StopListening(void);
+private:
+	static LRESULT CALLBACK s_MessageWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+	static VOID CALLBACK s_PowerKeyChanged(PVOID context, BOOLEAN timedOut);
+	void _SendClientNotification();
+	void _WatchPowerKey();
+
+	long m_cRef = 1;
+	HWND m_hwndNotify = nullptr;
+	UINT m_idNotify = 0;
+	HWND m_hwndMessage = nullptr;
+	HPOWERNOTIFY m_powerNotify[3] = {};
+	HKEY m_powerKey = nullptr;
+	HANDLE m_powerKeyEvent = nullptr;
+	HANDLE m_powerKeyWait = nullptr;
+};
+
 class CAuthUIWrapper: public IShutdownChoices7
 {
 public:

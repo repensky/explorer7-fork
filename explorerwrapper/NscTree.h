@@ -57,6 +57,59 @@ static void __fastcall SHComputeDPI(HWND a1, int* a2, int* a3)
 		*a3 = v11;
 }
 
+// CNscTree field offsets, read out of ExplorerFrame with symbols, see notes/24h2-support.md
+// 24H2 put one more pointer ahead of the tree window, so everything past it moved by eight
+struct NscTreeLayout
+{
+	int indentWrite;   // SetIndentValue stores here, from the values private interface
+	int heightWrite;   // SetItemHeight stores here, from the visual properties interface
+	int treeWnd;       // the treeview window, from the object base
+	int dpiWnd;        // the window the DPI is measured on, from the object base
+	int indentRead;    // what ScaleAndSetIndent scales, from the object base
+	int heightRead;    // what ScaleAndSetRowHeight scales, from the object base
+};
+
+// 19041 through 23H2 use the first set, 24H2 the second
+static const NscTreeLayout c_nscLayout19041 = { 0xA0, 0xC8, 0x178, 0x188, 0x1D0, 0x1C8 };
+static const NscTreeLayout c_nscLayout26100 = { 0xA8, 0xD0, 0x180, 0x190, 0x1D8, 0x1D0 };
+static const NscTreeLayout* g_nscLayout = &c_nscLayout19041;
+
+// Pulls the store offset out of ExplorerFrame's own method, mov [rcx+disp32],edx
+// Zero when the code does not open that way, a hook from another mod lands here too
+static int ReadNscStoreOffset(void* iface, int slot, int skip)
+{
+	BYTE* fn = (BYTE*)(*(void***)iface)[slot];
+	if (!fn || IsBadReadPtr(fn, skip + 6))
+		return 0;
+	fn += skip;
+	if (fn[0] == 0x89 && fn[1] == 0x91)
+		return *(int*)(fn + 2);
+	return 0;
+}
+
+// Picks the layout from what ExplorerFrame actually does, the build only settles a tie
+static const NscTreeLayout* PickNscLayout(void* visualProps, void* privatec)
+{
+	// Slot 4 is SetIndentValue, slot 6 is SetItemHeight, which starts with a 4 byte sub rsp
+	// Both slots were read off the ExplorerFrame vtables on 19044 and 26100
+	int indentStore = ReadNscStoreOffset(privatec, 4, 0);
+	int heightStore = ReadNscStoreOffset(visualProps, 6, 4);
+	ULONG build = g_osVersion.BuildNumber();
+
+	const NscTreeLayout* pick = NULL;
+	if (indentStore == c_nscLayout19041.indentWrite && heightStore == c_nscLayout19041.heightWrite)
+		pick = &c_nscLayout19041;
+	else if (indentStore == c_nscLayout26100.indentWrite && heightStore == c_nscLayout26100.heightWrite)
+		pick = &c_nscLayout26100;
+	else if (!indentStore && !heightStore)
+		pick = build >= 26100 ? &c_nscLayout26100 : &c_nscLayout19041;
+
+	dbgprintf(L"explorer7: CNscTree stores at %X and %X on build %u, layout %s",
+		indentStore, heightStore, build,
+		pick == &c_nscLayout26100 ? L"26100" : pick == &c_nscLayout19041 ? L"19041" : L"unknown");
+	return pick;
+}
+
 //custom versions of the functions because ppl use patched dlls and aerexplorer messes this up
 static void __fastcall CNscTree_ScaleAndSetIndent(__int64 a1)
 {
@@ -65,16 +118,16 @@ static void __fastcall CNscTree_ScaleAndSetIndent(__int64 a1)
 	int nNumerator; // [rsp+30h] [rbp+8h] BYREF
 	int v6; // [rsp+38h] [rbp+10h] BYREF
 
-	v1 = *(DWORD*)(a1 + 0x1D0);
-	SHComputeDPI(*(HWND*)(a1 + 0x188), &v6, &nNumerator);
+	v1 = *(DWORD*)(a1 + g_nscLayout->indentRead);
+	SHComputeDPI(*(HWND*)(a1 + g_nscLayout->dpiWnd), &v6, &nNumerator);
 	v3 = MulDiv(v1, nNumerator, 96);
-	SendMessageW(*(HWND*)(a1 + 0x178), 0x1107u, v3, 0LL);
+	SendMessageW(*(HWND*)(a1 + g_nscLayout->treeWnd), 0x1107u, v3, 0LL);
 }
 
 static void __fastcall CNscTree_SetIndentValue(__int64 a1, int a2)
 {
 
-	*(DWORD*)(a1 + 0xA0) = a2;
+	*(DWORD*)(a1 + g_nscLayout->indentWrite) = a2;
 	CNscTree_ScaleAndSetIndent(a1 - 304);
 }
 
@@ -88,8 +141,8 @@ static void __fastcall CNscTree_ScaleAndSetRowHeight(__int64 a1)
 	int DeviceCaps; // edi
 	int v9; // eax
 
-	v1 = *(DWORD*)(a1 + 0x1C8);
-	v2 = *(HWND*)(a1 + 0x188);
+	v1 = *(DWORD*)(a1 + g_nscLayout->heightRead);
+	v2 = *(HWND*)(a1 + g_nscLayout->dpiWnd);
 	if (v2 && (v5 = fGetWindowDpiAwarenessContext(v2), fAreDpiAwarenessContextsEqual(v5, (DPI_AWARENESS_CONTEXT)-4LL)))
 	{
 		DeviceCaps = fGetDpiForWindow(v2);
@@ -110,13 +163,13 @@ static void __fastcall CNscTree_ScaleAndSetRowHeight(__int64 a1)
 		}
 	}
 	v9 = MulDiv(v1, DeviceCaps, 96);
-	SendMessageW(*(HWND*)(a1 + 376), 0x111Bu, v9, 0LL);
+	SendMessageW(*(HWND*)(a1 + g_nscLayout->treeWnd), 0x111Bu, v9, 0LL);
 }
 
 static __int64 __fastcall CNscTree_SetItemHeight(__int64 a1, int a2)
 {
 
-	*(DWORD*)(a1 + 200) = a2;
+	*(DWORD*)(a1 + g_nscLayout->heightWrite) = a2;
 	CNscTree_ScaleAndSetRowHeight(a1 - 256);
 	return 0LL;
 }
@@ -144,13 +197,17 @@ static HRESULT __fastcall CNSCHost_FillNSC(uintptr_t nscHost) //todo: reimplemen
 		IVisualProperties* visualProps = (IVisualProperties*)(__int64(control) + 0x20);
 		INameSpaceTreeControlValuesPrivate* privatec = (INameSpaceTreeControlValuesPrivate*)(__int64(control) + 0x50);
 
-		if (g_osVersion.BuildNumber() < 14393) // handle TH1 and TH2 - less explorerframe modding exists, so should be fine
+		// An unknown layout goes through ExplorerFrame's own methods rather than guessed offsets
+		const NscTreeLayout* layout = g_osVersion.BuildNumber() < 14393 ? NULL : PickNscLayout(visualProps, privatec);
+
+		if (!layout) // handle TH1 and TH2 - less explorerframe modding exists, so should be fine
 		{
 			privatec->SetIndentValue(indentValue);
 			visualProps->SetItemHeight(itemHeight);
 		}
 		else
 		{
+			g_nscLayout = layout;
 			CNscTree_SetIndentValue((uintptr_t)privatec, indentValue);
 			CNscTree_SetItemHeight((uintptr_t)visualProps, itemHeight);
 		}

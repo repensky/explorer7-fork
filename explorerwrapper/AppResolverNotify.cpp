@@ -34,14 +34,12 @@ ULONG STDMETHODCALLTYPE CAppResolverNotify8::Release(void)
 }
 
 HRESULT STDMETHODCALLTYPE CAppResolverNotify8::OnChangeNotify(long p1,PVOID* p2,PVOID* p3)
-{	
-	dbgprintf(L"CAppResolverNotify8::OnChangeNotify %p %p %p",p1,p2,p3);
+{
 	return E_NOTIMPL;
 }
 
 HRESULT STDMETHODCALLTYPE CAppResolverNotify8::AddHotkey(unsigned int p1, PVOID* p2, PVOID* p3, int p4)
 {
-	dbgprintf(L"CAppResolverNotify8::AddHotkey %p %p %p %p",p1,p2,p3,p4);
 	return E_NOTIMPL;
 	//return m_resolver7->AddHotkey(p1,p2,p3,p4);
 }

@@ -1,15 +1,19 @@
-#pragma once
+﻿#pragma once
 #pragma warning(disable:4302)
 #pragma warning(disable:4311)
 #pragma warning(disable:4312)
 
 #include "common.h"
 #include "dbgprint.h"
+#include "FlyoutFix.h"
 #include "OptionConfig.h"
 #include "OSVersion.h"
 #include "TypeDefinitions.h"
 #include "ThemeManager.h"
 #include "RegistryManager.h"
+#include "SignInFrameFix.h"
+#include "SndVolFlyoutFix.h"
+#include "StoreContentFix.h"
 
 // Ittr: Code that doesn't relate to specific hooks resides here
 // e.g. helper functions, HWND retrieval functions, error messages, non-descript registry changes
@@ -34,33 +38,92 @@ HMODULE GetCurrentModuleHandle() //use for internal resource calls... honestly i
 	return hMod;
 }
 
+//---Theme state snapshot-----------------------------------
+// Each of the four OS answers below is a win32k call, and the checks run per window message
+
+#define THEME_SNAP_APPTHEMED    0x01
+#define THEME_SNAP_THEMEACTIVE  0x02
+#define THEME_SNAP_HIGHCONTRAST 0x04
+#define THEME_SNAP_COMPOSITION  0x08
+#define THEME_SNAP_VALID        0x80
+
+// Bumped by anything that sees a theme, contrast or composition change
+static volatile LONG g_themeSnapSerial = 0;
+
+// Flags in the low byte, the serial above them, the tick it was taken in the high half
+static volatile LONG64 g_themeSnap = 0;
+
+// Kept for a second at most, a change that slips past every listener still lands
+#define THEME_SNAP_MAX_AGE_MS 1000
+
+void InvalidateThemeStateSnapshot(void)
+{
+	InterlockedIncrement(&g_themeSnapSerial);
+}
+
+static UINT ThemeStateSnapshot(void)
+{
+	ULONG now = (ULONG)GetTickCount64();
+	ULONG serial = (ULONG)g_themeSnapSerial & 0xFFFFFF;
+	LONG64 snap = g_themeSnap;
+
+	if ((snap & THEME_SNAP_VALID)
+		&& (((ULONG)((ULONG64)snap >> 8)) & 0xFFFFFF) == serial
+		&& now - (ULONG)((ULONG64)snap >> 32) < THEME_SNAP_MAX_AGE_MS)
+	{
+		return (UINT)(snap & 0xFF);
+	}
+
+	UINT flags = THEME_SNAP_VALID;
+	if (IsAppThemed())
+		flags |= THEME_SNAP_APPTHEMED;
+	if (IsThemeActive())
+		flags |= THEME_SNAP_THEMEACTIVE;
+	if (IsHighContrastEnabled())
+		flags |= THEME_SNAP_HIGHCONTRAST;
+	if (IsCompositionActive())
+		flags |= THEME_SNAP_COMPOSITION;
+
+	// Taken against the serial read first, so a change during the reads forces a retake
+	InterlockedExchange64(&g_themeSnap, ((LONG64)now << 32) | ((LONG64)serial << 8) | flags);
+	return flags;
+}
+
+bool IsCompositionActiveCached(void)
+{
+	return (ThemeStateSnapshot() & THEME_SNAP_COMPOSITION) != 0;
+}
+
 bool IsClassicTheme(void)
 {
-	return !IsThemeActive() || s_ClassicTheme || IsHighContrastEnabled();
+	UINT snap = ThemeStateSnapshot();
+	return !(snap & THEME_SNAP_THEMEACTIVE) || s_ClassicTheme || (snap & THEME_SNAP_HIGHCONTRAST);
 }
 
 bool IsCompositionManuallyDisabled(void)
 {
-	return s_DisableComposition || IsHighContrastEnabled();
+	return s_DisableComposition || (ThemeStateSnapshot() & THEME_SNAP_HIGHCONTRAST);
 }
 bool ShouldDisableAeroPeek(void)
 {
-	return !IsAppThemed() || IsClassicTheme() || !IsCompositionActive() || IsCompositionManuallyDisabled();
+	UINT snap = ThemeStateSnapshot();
+	return !(snap & THEME_SNAP_APPTHEMED) || IsClassicTheme() || !(snap & THEME_SNAP_COMPOSITION) || IsCompositionManuallyDisabled();
 }
 
+// Basic leaves real DWM running, so faking frame DWM off there flickers the frame
 bool ShouldForceExplorerFrameDwmOff(void)
 {
-	return !IsAppThemed() || IsClassicTheme() || IsCompositionManuallyDisabled();
+	return !(ThemeStateSnapshot() & THEME_SNAP_APPTHEMED) || IsClassicTheme();
 }
 
 bool ShouldDisableShellWindowTransparency(void)
 {
-	return !IsAppThemed() || IsClassicTheme() || IsCompositionManuallyDisabled();
+	return !(ThemeStateSnapshot() & THEME_SNAP_APPTHEMED) || IsClassicTheme() || IsCompositionManuallyDisabled();
 }
 
 bool ShouldApplyShellWindowAccent(void)
 {
-	return !ShouldDisableShellWindowTransparency() && IsCompositionActive() && s_ColorizationOptions != 0;
+	return !ShouldDisableShellWindowTransparency() && IsCompositionActiveCached() && s_ColorizationOptions != 0;
 }
 
 bool AllowThemes(void)
@@ -175,10 +238,17 @@ static const LPCWSTR CLASSIC_SUBAPP_PROP = L"Explorer7ClassicSubApp";
 static const LPCWSTR CLASSIC_SUBID_PROP = L"Explorer7ClassicSubId";
 static const LPCWSTR EXPLORER_FRAME_PREVPROC_PROP = L"Explorer7FramePrevProc";
 static LRESULT CALLBACK ExplorerFrameProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+static void SyncExplorerFrameTheme(HWND hwnd);
 void ClearForcedActiveWindowAppearance(HWND hwnd);
+void ForceActiveWindowAppearance(HWND hwnd);
 void DisableWindowNcRendering(HWND hwnd);
 void RestoreWindowNcRendering(HWND hwnd);
 void NotifyWindowCompositionChanged(HWND wnd);
+
+// Lives in ShellAccentOverride.h, which needs everything below to be declared first
+bool ShellAccentOverrideActive();
+void ClearShellAccentWorkaround(HWND hwnd);
+void ApplyShellAccentWorkaround(HWND hwnd);
 
 static void ApplyDialogWindowTheme(HWND hwnd, LPCWSTR pszSubApp, LPCWSTR pszSubId)
 {
@@ -302,9 +372,12 @@ static LRESULT CALLBACK ExplorerFrameProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 		return DefWindowProcW(hwnd, uMsg, wParam, lParam);
 	}
 
-	if (!IsClassicTheme() && (uMsg == WM_NCACTIVATE || uMsg == WM_ACTIVATE || uMsg == WM_SETFOCUS))
+	// Only frames still marked classic need the restore, and it runs once
+	// Without the mark it re themed on every activation, which flashed the ribbon
+	if (!IsClassicTheme() && GetPropW(hwnd, CLASSIC_FRAME_PROP)
+		&& (uMsg == WM_NCACTIVATE || uMsg == WM_ACTIVATE || uMsg == WM_SETFOCUS))
 	{
-		RestoreExplorerFrameTheme(hwnd);
+		SyncExplorerFrameTheme(hwnd);
 	}
 
 	if (uMsg == WM_NCDESTROY)
@@ -419,7 +492,7 @@ DWORD GetColorizationColor()
 	int b = (colors.ColorizationColor) & 0xFF;
 
 	// Automatic colorization can report alpha as 0 on Windows 10.
-	if (s_ColorizationOptions != 3 && a == 0x00 && (r != 0x00 || g != 0x00 || b != 0x00)) // only apply if it appears that the user is trying to set an actual colour - full transparency remains possible!
+	if (a == 0x00 && (r != 0x00 || g != 0x00 || b != 0x00)) // only apply if it appears that the user is trying to set an actual colour - full transparency remains possible!
 	{
 		a = 0xC4; // we default to this as it's used by the majority of win10/11 default colours
 	}
@@ -485,11 +558,14 @@ ACCENT_STATE GetAccentState(bool isThumbnail)
 
 }
 
+// The returned pvData used to point at a stack local that died on return, so
+// DWM read whatever happened to be left there. Per thread storage outlives it.
 __forceinline WINDOWCOMPOSITIONATTRIBDATA GetTrayAccentProperties(bool isThumbnail)
 {
+	static thread_local ACCENT_POLICY accentPolicy;
 	WINDOWCOMPOSITIONATTRIBDATA attrData;
-	ACCENT_POLICY accentPolicy;
 
+	accentPolicy = {};
 	accentPolicy.AccentState = GetAccentState(isThumbnail);
 	accentPolicy.AccentFlags = (isThumbnail) ? (0x1 | 0x2 | 0x200) : (0x13);
 	accentPolicy.GradientColor = GetColorizationColor();
@@ -502,8 +578,10 @@ __forceinline WINDOWCOMPOSITIONATTRIBDATA GetTrayAccentProperties(bool isThumbna
 
 __forceinline WINDOWCOMPOSITIONATTRIBDATA GetDisabledTrayAccentProperties()
 {
+	static thread_local ACCENT_POLICY accentPolicy;
 	WINDOWCOMPOSITIONATTRIBDATA attrData;
-	ACCENT_POLICY accentPolicy = {};
+
+	accentPolicy = {};
 	accentPolicy.AccentState = ACCENT_DISABLED;
 
 	attrData.Attrib = WCA_ACCENT_POLICY;
@@ -523,19 +601,78 @@ void DisableShellWindowBlur(HWND hwnd)
 	DwmEnableBlurBehindWindow(hwnd, &blurBehind);
 }
 
+// Diagnostics only, set HKCU Explorer\Advanced LogAccentTrace to 1 to turn on
+// This runs per taskbar repaint and every input below costs a dwm or theme call
+static bool AccentTraceEnabled()
+{
+	static int cached = -1;
+	if (cached < 0)
+	{
+		DWORD v = 0;
+		RegGetDWORD(HKEY_CURRENT_USER, c_szSubkey, L"LogAccentTrace", &v);
+		cached = v ? 1 : 0;
+	}
+	return cached != 0;
+}
+
+// Dumps every input to the accent decision, so the two builds can be diffed
+void TraceAccentState(LPCWSTR where, HWND hwnd, LPCWSTR took)
+{
+	if (!AccentTraceEnabled())
+		return;
+
+	dbgprintf(
+		L"E7TRACE %s hwnd=%p took=%s apply=%d disTrans=%d classic=%d "
+		L"themeActive=%d appThemed=%d compActive=%d compManDis=%d "
+		L"sClassic=%d sDisComp=%d colorOpts=%d grad=%08X",
+		where, hwnd, took,
+		(int)ShouldApplyShellWindowAccent(),
+		(int)ShouldDisableShellWindowTransparency(),
+		(int)IsClassicTheme(),
+		(int)IsThemeActive(),
+		(int)IsAppThemed(),
+		(int)IsCompositionActive(),
+		(int)IsCompositionManuallyDisabled(),
+		(int)s_ClassicTheme,
+		(int)s_DisableComposition,
+		(int)s_ColorizationOptions,
+		(unsigned)GetColorizationColor());
+}
+
 void UpdateShellWindowAccent(HWND hwnd, bool isThumbnail)
 {
+	// The override drives these windows from the accent hook, never from here
+	// This runs on WM_ERASEBKGND, so re-arming blur here would blank the taskbar
+	if (ShellAccentOverrideActive())
+	{
+		TraceAccentState(L"UpdateAccent", hwnd, L"OVERRIDE");
+		return;
+	}
+
+	// Dropped so the override re-arms the window if it is switched back on
+	ClearShellAccentWorkaround(hwnd);
+
 	if (ShouldApplyShellWindowAccent())
 	{
+		TraceAccentState(L"UpdateAccent", hwnd, L"APPLY");
 		SetWindowCompositionAttribute(hwnd, &GetTrayAccentProperties(isThumbnail));
+
+		// The accent alone leaves the tray reading inactive, which flattens it
+		// dwm drops this on a restart and only an explicit write brings it back
+		ForceActiveWindowAppearance(hwnd);
 		return;
 	}
 
-	if (!ShouldDisableShellWindowTransparency())
+	// Leaving early is only safe while composition is on. With it off, an
+	// accent that was armed earlier still tints the window and lets the
+	// wallpaper through, because the classic paint writes alpha 0.
+	if (!ShouldDisableShellWindowTransparency() && IsCompositionActive())
 	{
+		TraceAccentState(L"UpdateAccent", hwnd, L"SKIP");
 		return;
 	}
 
+	TraceAccentState(L"UpdateAccent", hwnd, L"DISABLE");
 	SetWindowCompositionAttribute(hwnd, &GetDisabledTrayAccentProperties());
 	ClearForcedActiveWindowAppearance(hwnd);
 	DisableShellWindowBlur(hwnd);
@@ -848,7 +985,24 @@ BOOL IsShellManagedWindow(HWND hwnd)
 bool ShouldExcludeFromTaskbar(HWND hwnd)
 {
 	wchar_t text[256];
-	GetWindowTextW(hwnd, text, 255);
+	text[0] = 0;
+
+	// InternalGetWindowText reads the stored caption with no WM_GETTEXT send
+	// A blocking GetWindowText here stalls the tray thread on a busy frame
+	static int (WINAPI* fnInternal)(HWND, LPWSTR, int) = nullptr;
+	static bool resolved = false;
+	if (!resolved)
+	{
+		HMODULE u = GetModuleHandleW(L"user32.dll");
+		if (u)
+			fnInternal = (decltype(fnInternal))GetProcAddress(u, "InternalGetWindowText");
+		resolved = true;
+	}
+
+	if (fnInternal)
+		fnInternal(hwnd, text, 255);
+	else
+		GetWindowTextW(hwnd, text, 255);
 
 	if (!StrCmpW(text, L"Microsoft Text Input Application") || !StrCmpW(text, L"Windows Shell Experience Host") || !StrCmpW(text, L"Start") || !StrCmpW(text, L"Search"))
 		return true;
@@ -886,14 +1040,28 @@ bool IsWindowNotDesktopOrTray(HWND hwnd)
 	return true;
 }
 
-BOOL WINAPI IsWindowVisibleNEW(HWND hWnd)
+// CDesktopHost owns this class, it hosts both the start menu and every jumplist
+static bool IsDesktopHostWindow(HWND hwnd)
 {
-	if (!IsWindowVisible(hWnd) || !IsValidDesktopZOrderBand(hWnd, TRUE))
+	WCHAR cls[32];
+	return GetClassNameW(hwnd, cls, ARRAYSIZE(cls)) && lstrcmpiW(cls, L"DV2ControlHost") == 0;
+}
+
+// The costly half of the visibility hook, bands, dwm, window text and themes
+// The tray sweeps every window on each destroy so this is kept out of that path
+static BOOL IsWindowVisibleClassify(HWND hWnd)
+{
+	// CDesktopHost::_OnDismiss hides the start menu only when this says it is visible
+	// Taskbar filtering must not answer that, a no leaves the menu stuck open
+	if (IsDesktopHostWindow(hWnd))
+		return TRUE;
+
+	if (!IsValidDesktopZOrderBand(hWnd, TRUE))
 		return FALSE;
 
-	BOOL bCloaked;
-	DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &bCloaked, sizeof(BOOL));
-	if (bCloaked)
+	// A failed query never writes the flag, so an uninitialised read cloaked at random
+	BOOL bCloaked = FALSE;
+	if (SUCCEEDED(DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &bCloaked, sizeof(bCloaked))) && bCloaked)
 		return FALSE;
 
 	if ((ShouldForceExplorerFrameDwmOff() || GetPropW(hWnd, CLASSIC_FRAME_PROP)) && IsExplorerFrameWindow(hWnd))
@@ -917,11 +1085,82 @@ BOOL WINAPI IsWindowVisibleNEW(HWND hWnd)
 	return TRUE;
 }
 
+BOOL WINAPI IsWindowVisibleNEW(HWND hWnd)
+{
+	// Real visibility is cheap and changes often so it always runs live
+	if (!IsWindowVisible(hWnd))
+		return FALSE;
+
+	// CTaskBand enumerates every window on each destroy, which repeats this hard
+	// A short lived per window answer keeps one sweep from redoing the costly half
+	struct Entry { HWND hwnd; ULONGLONG tick; BOOL result; };
+	static Entry cache[256];
+
+	ULONGLONG now = GetTickCount64();
+	unsigned idx = (unsigned)(((ULONG_PTR)hWnd >> 2) & 0xFF);
+
+	if (cache[idx].hwnd == hWnd && now - cache[idx].tick < 250)
+		return cache[idx].result;
+
+	BOOL result = IsWindowVisibleClassify(hWnd);
+
+	cache[idx].hwnd = hWnd;
+	cache[idx].tick = now;
+	cache[idx].result = result;
+	return result;
+}
+
 __int64 ShouldAddWindowToTray(HWND hwnd)
 {
 	BOOL ret = IsWindowNotDesktopOrTray(hwnd) && IsWindowVisibleNEW(hwnd) && ShouldAddWindowToTrayHelper(hwnd);
 	//dbgprintf(L"ShouldAddWindowToTray %i", (int)ret);
 	return ret;
+}
+
+//---Control Panel host split-------------------------------
+// 24H2 sends Control Panel to a separate host process launched as explorer.exe
+// The swapped 7850 exe cannot serve that factory, so the launch retries forever
+void NeuterExplorerHostSplit()
+{
+	if (g_osVersion.BuildNumber() < 22000)
+		return;
+
+	DWORD keep = 0;
+	RegGetDWORD(HKEY_CURRENT_USER, c_szSubkey, L"KeepExplorerHostSplit", &keep);
+	if (keep)
+		return;
+
+	HMODULE ef = LoadLibraryW(L"ExplorerFrame.dll");
+	if (!ef)
+		return;
+
+	static const char* c_sepProcSites[] =
+	{
+		// UseSeparateProcess(IShellItem *), read by CExplorerLauncher::ShowWindow
+		"4C 8B DC 49 89 5B 10 49 89 73 18 57 48 83 EC 60 48 8B 05 ?? ?? ?? ?? 48 33 C4",
+		// UseSeparateProcess(PCIDLIST_ABSOLUTE), read by GetHostFromTarget
+		"48 89 5C 24 10 48 89 74 24 18 55 57 41 54 41 56 41 57 48 8B EC 48 83 EC 70",
+	};
+
+	for (int i = 0; i < ARRAYSIZE(c_sepProcSites); i++)
+	{
+		uintptr_t fn = FindPattern((uintptr_t)ef, c_sepProcSites[i]);
+		if (!fn)
+		{
+			dbgprintf(L"explorer7: UseSeparateProcess site %d not found", i);
+			continue;
+		}
+
+		// Answering no keeps the window in this process, the Windows 10 behaviour
+		DWORD old = 0;
+		VirtualProtect((void*)fn, 3, PAGE_EXECUTE_READWRITE, &old);
+		((uint8_t*)fn)[0] = 0x33;
+		((uint8_t*)fn)[1] = 0xC0;
+		((uint8_t*)fn)[2] = 0xC3;
+		VirtualProtect((void*)fn, 3, old, &old);
+
+		dbgprintf(L"explorer7: UseSeparateProcess site %d answered no at %p", i, (void*)fn);
+	}
 }
 
 // Create all programs shellfolder on 1607+ where it doesn't already exist
@@ -933,25 +1172,32 @@ void CreateShellFolder()
 	{
 		DWORD value = 0; // initialise in memory
 		DWORD attrVal = 0x28100000; // doesn't work when reduced to a single string, annoying but atleast we can use it here
-		RegGetDWORD(HKEY_CURRENT_USER, sz_ShellFolder3, L"Attributes", &value); // output the data from attributes key...
+		LRESULT read = RegGetDWORD(HKEY_CURRENT_USER, sz_ShellFolder3, L"Attributes", &value); // output the data from attributes key...
 
-		if (value != attrVal) // basically if the attribute value doesn't exist or is the wrong value...
+		// A class without its server key is as good as missing, so both are checked
+		WCHAR server[MAX_PATH] = L"";
+		DWORD cbServer = sizeof(server);
+		LRESULT serverRead = SHRegGetValueW(HKEY_CURRENT_USER, sz_ShellFolder2, NULL, SRRF_RT_REG_SZ | SRRF_RT_REG_EXPAND_SZ | SRRF_NOEXPAND, NULL, server, &cbServer);
+
+		if (value != attrVal || serverRead != ERROR_SUCCESS) // basically if the attribute value doesn't exist or is the wrong value...
 		{
 			// we create all the relevant values. issue solved for new users - program list works out of the box now
-			RegSetSZ(HKEY_CURRENT_USER, sz_ShellFolder, NULL, (DWORD*)L"Programs Folder and Fast Items"); // create clsid name
-			RegSetExpandSZ(HKEY_CURRENT_USER, sz_ShellFolder2, NULL, (DWORD*)L"%SystemRoot%\\system32\\shell32.dll"); // point it to shell32
-			RegSetSZ(HKEY_CURRENT_USER, sz_ShellFolder2, L"ThreadingModel", (DWORD*)L"Apartment"); // regular threading model criteria...
-			RegSetDWORD(HKEY_CURRENT_USER, sz_ShellFolder3, L"Attributes", &attrVal); // apply folder attributes, arguably the most important part
+			LRESULT name = RegSetSZ(HKEY_CURRENT_USER, sz_ShellFolder, NULL, (DWORD*)L"Programs Folder and Fast Items"); // create clsid name
+			LRESULT path = RegSetExpandSZ(HKEY_CURRENT_USER, sz_ShellFolder2, NULL, (DWORD*)L"%SystemRoot%\\system32\\shell32.dll"); // point it to shell32
+			LRESULT model = RegSetSZ(HKEY_CURRENT_USER, sz_ShellFolder2, L"ThreadingModel", (DWORD*)L"Apartment"); // regular threading model criteria...
+			LRESULT attrs = RegSetDWORD(HKEY_CURRENT_USER, sz_ShellFolder3, L"Attributes", &attrVal); // apply folder attributes, arguably the most important part
+			dbgprintf(L"explorer7: Programs folder class written, read %d %d, writes %d %d %d %d", (int)read, (int)serverRead, (int)name, (int)path, (int)model, (int)attrs);
 		}
 	}
 }
 
 
 // Warn and exit on unsupported OS builds
+// 26100 is checked against its binaries in notes/24h2-support.md, 26200 shares them
 void UnsupportedBuildWarningAndExit()
 {
 	ULONG build = g_osVersion.BuildNumber();
-	if (build < 9999 || build > 20000)
+	if (build < 9999 || build > 26200)
 	{
 		MessageBoxW(NULL, L"This build of Windows is not supported.", L"explorer7", MB_ICONEXCLAMATION);
 		ExitProcess(0);
@@ -990,7 +1236,6 @@ HWND WINAPI CreateWindowInBandNew(DWORD dwExStyle,
 {
 	if (s_EnableImmersiveShellStack == 1) // immersive enabled
 	{
-		DWORD p0 = (DWORD)_ReturnAddress();
 		dwExStyle = dwExStyle | WS_EX_TOOLWINDOW; // TODO is this needed?
 		HWND ret = CreateWindowExW(dwExStyle, lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hwndParent, hMenu, hInstance, lpParam);
 
@@ -1012,32 +1257,117 @@ HWND WINAPI CreateWindowInBandNew(DWORD dwExStyle,
 			DwmSetWindowAttribute(ret, DWMWA_CLOAK, &shouldCloak, sizeof(shouldCloak));
 		}
 
-		dbgprintf(L"CREATEWINDOWINBANDNEW %i", dwBand);
+		// This path drops dwTypeFlags, so it matters who reaches it and from where
+		if (ret && lpClassName && !IS_INTRESOURCE(lpClassName) &&
+			lstrcmp(lpClassName, L"ApplicationFrameWindow") == 0)
+		{
+			void* bandCaller = _ReturnAddress();
+			HMODULE bandMod = nullptr;
+			WCHAR bandName[MAX_PATH] = {};
+
+			if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+				GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)bandCaller, &bandMod))
+			{
+				GetModuleFileName(bandMod, bandName, ARRAYSIZE(bandName));
+			}
+
+			dbgprintf(L"explorer7: band frame %p came from %s rva 0x%IX, plain orig %p",
+				ret, bandName[0] ? bandName : L"unknown",
+				bandMod ? (ULONG_PTR)bandCaller - (ULONG_PTR)bandMod : 0,
+				CreateWindowInBandOrig);
+		}
 
 		if (ret)
 		{
 			SetProp(ret, L"UIA_WindowVisibilityOverriden", (HANDLE)2);
 			SetProp(ret, L"explorer7.WindowBand", (HANDLE)dwBand);
 		}
-		
+
+		// Battery and Action Center flyouts get the glass frame here
+		FlyoutFixOnBandWindow(ret, lpClassName, L"Band");
 		return ret;
 	}
 	else // Preserve legacy codepath for Windows 8.1 and non-immersive users
 	{
-		DWORD p0 = (DWORD)_ReturnAddress();
 		dwStyle = dwStyle | WS_EX_TOOLWINDOW;
 		HWND ret = CreateWindowInBandOrig(dwExStyle, (LPWSTR)lpClassName, (PVOID)lpWindowName, (PVOID)dwStyle, (PVOID)x, (PVOID)y, (PVOID)nWidth, (PVOID)nHeight, hwndParent, hMenu, hInstance, lpParam, dwBand & 1);
-		dbgprintf(L"%p: CreateWindowInBand %p %s %p %p %p %p %p %p %p %p %p %p %p = %p %p", p0, dwExStyle, lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hwndParent, hMenu, hInstance, lpParam, dwBand, ret, GetLastError());
 		SetProp(ret, L"explorer7.WindowBand", (HANDLE)dwBand);
+		FlyoutFixOnBandWindow(ret, lpClassName, L"BandLegacy");
 		return ret;
 	}
 }
 
 HWND WINAPI CreateWindowInBandExNew(DWORD exStyle, LPWSTR szClassName, PVOID p3, PVOID p4, PVOID p5, PVOID p6, PVOID p7, PVOID p8, PVOID p9, PVOID p10, PVOID p11, PVOID p12, DWORD p13, DWORD dwTypeFlags)
 {
-	DWORD p0 = (DWORD)_ReturnAddress();
+	// Native registration is out of reach for this process, see notes/modern-app-window.md
+	// The flag stays because the sign in frame still needs its own logging
+	BOOL wantsNative = szClassName && !IS_INTRESOURCE(szClassName) &&
+		lstrcmp(szClassName, L"ApplicationFrameWindow") == 0;
+
+	DWORD exStyleIn = exStyle;
 	exStyle = exStyle | WS_EX_TOOLWINDOW;
+
+	// A sign in frame is created with no owner, and StartModal then refuses it
+	// It inherits the shell managed bit from an owner, so lend it one for the call
+	BOOL borrowedOwner = FALSE;
+	if (!p9 && szClassName && !IS_INTRESOURCE(szClassName) &&
+		lstrcmp(szClassName, L"ApplicationFrameWindow") == 0)
+	{
+		HWND owner = SignInFindOwner();
+		if (owner)
+		{
+			p9 = (PVOID)owner;
+			borrowedOwner = TRUE;
+			dbgprintf(L"explorer7: lending the sign in frame owner %p", owner);
+		}
+	}
+
+	BOOL isAppFrame = wantsNative;
+
 	HWND ret = CreateWindowInBandExOrig(exStyle, szClassName, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13 & 1, dwTypeFlags);
+
+	// Type flag bits 0 and 1 need an imrsiv section in the process image
+	// An unpatched 7850 explorer has none, so keep the old path for those boxes
+	if (!ret)
+	{
+		DWORD exErr = GetLastError();
+
+		ret = CreateWindowInBandNew(exStyle, szClassName, (LPCWSTR)p3, (DWORD)(DWORD_PTR)p4,
+			(int)(DWORD_PTR)p5, (int)(DWORD_PTR)p6, (int)(DWORD_PTR)p7, (int)(DWORD_PTR)p8,
+			(HWND)p9, (HMENU)p10, (HINSTANCE)p11, p12, p13 & 1);
+
+		dbgprintf(L"explorer7: ex export refused with %lu, plain path gave %p", exErr, ret);
+	}
+
+	if (isAppFrame)
+	{
+		// hInstance names the module owning the class, which need not be the caller
+		void* caller = _ReturnAddress();
+		HMODULE callerMod = nullptr;
+		WCHAR callerName[MAX_PATH] = {};
+
+		if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)caller, &callerMod))
+		{
+			GetModuleFileName(callerMod, callerName, ARRAYSIZE(callerName));
+		}
+
+		dbgprintf(L"explorer7: frame exStyle in 0x%08X asked 0x%08X typeFlags 0x%08X got %p err %lu thread %lu",
+			exStyleIn, exStyle, dwTypeFlags, ret, GetLastError(), GetCurrentThreadId());
+
+		dbgprintf(L"explorer7: frame made by %s rva 0x%IX",
+			callerName[0] ? callerName : L"unknown",
+			callerMod ? (ULONG_PTR)caller - (ULONG_PTR)callerMod : 0);
+	}
+
+	// Windows 10 leaves this frame ownerless and lets StartModal set one
+	if (ret && borrowedOwner)
+	{
+		SetWindowLongPtr(ret, GWLP_HWNDPARENT, 0);
+
+		// This thread owns the new window, which is the only place subclassing works
+		SignInAttachFrame(ret);
+	}
 
 	// Ittr: Emulate always-on-top behaviour for Windows 10 toasts
 	BOOL excludeFromPeek = true;
@@ -1057,11 +1387,11 @@ HWND WINAPI CreateWindowInBandExNew(DWORD exStyle, LPWSTR szClassName, PVOID p3,
 		DwmSetWindowAttribute(ret, DWMWA_CLOAK, &shouldCloak, sizeof(shouldCloak));
 	}
 
-	dbgprintf(L"%p: CreateWindowInBandEx %p %s %p %p %p %p %p %p %p %p %p %p %p = %p %p", p0, exStyle, szClassName, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, ret, GetLastError());
-	dbgprintf(L"CreateWindowInBandExOrig %i", p13);
-
 	SetProp(ret, L"UIA_WindowVisibilityOverriden", (HANDLE)2);
 	SetProp(ret, L"explorer7.WindowBand", (HANDLE)p13);
+
+	// Some builds create the flyouts through this variant rather than the plain one
+	FlyoutFixOnBandWindow(ret, szClassName, L"BandEx");
 	return ret;
 }
 
@@ -1077,18 +1407,12 @@ BOOL WINAPI SetWindowBandNew(HWND hwnd, HWND hwndInsertAfter, DWORD flags)
 	}
 
 	SetProp(hwnd, L"explorer7.WindowBand", (HANDLE)flags);
-	dbgprintf(L"SetWindowBandNew %i", flags);
 	return TRUE;
 }
 
 BOOL WINAPI RegisterWindowHotkeyNew(HWND hwnd, int id, UINT mod, UINT vk)
 {
-	BOOL res = RegisterHotKeyApiOrg(hwnd, id, mod, vk);
-
-	if (!res)
-	{
-		return TRUE;
-	}
-
+	if (!RegisterHotKeyApiOrg(hwnd, id, mod, vk))
+		dbgprintf(L"RegisterHotKey id %d mod %X vk %X failed", id, mod, vk);
 	return TRUE;
 }
