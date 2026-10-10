@@ -18,6 +18,7 @@ DWORD s_AlphaValue;
 bool s_UseDCompFlyouts;
 bool s_ShellUIAccentOverride;
 int s_Win7DesktopIconRows;
+bool s_EnableWinXMenu;
 
 static bool s_ClassicThemeSetting;
 static bool s_DisableCompositionSetting;
@@ -191,4 +192,10 @@ void InitializeConfiguration()
 	DWORD dwWin7DesktopIconRows = 1;
 	g_registry.QueryValue(L"Win7DesktopIconRows", (LPBYTE)&dwWin7DesktopIconRows, sizeof(DWORD));
 	s_Win7DesktopIconRows = (dwWin7DesktopIconRows <= 2) ? (int)dwWin7DesktopIconRows : 1;
+
+	// Win+X and Start button right click power user menu, defaults to off (0)
+	// Read once here, the hotkey and the menu hooks go in at startup
+	DWORD dwEnableWinXMenu = 0;
+	g_registry.QueryValue(L"EnableWinXMenu", (LPBYTE)&dwEnableWinXMenu, sizeof(DWORD));
+	s_EnableWinXMenu = dwEnableWinXMenu != 0;
 }

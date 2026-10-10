@@ -232,6 +232,7 @@
     <ClInclude Include="trash.h" />
     <ClInclude Include="TrayNotify.h" />
     <ClInclude Include="UserTile.h" />
+    <ClInclude Include="WinXMenu.h" />
     <ClInclude Include="FlyoutFix.h" />
     <ClInclude Include="TypeDefinitions.h" />
     <ClInclude Include="UserAssist.h" />
@@ -291,6 +292,7 @@
     <ClCompile Include="TrayNotify.cpp" />
     <ClCompile Include="UserTile.cpp" />
     <ClCompile Include="UserTileFlyout.cpp" />
+    <ClCompile Include="WinXMenu.cpp" />
     <ClCompile Include="FlyoutFix.cpp" />
     <ClCompile Include="UserAssist.cpp" />
     <ClCompile Include="explorer_wrappers.cpp" />

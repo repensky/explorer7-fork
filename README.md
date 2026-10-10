@@ -7,9 +7,29 @@ explorer7 is a **wrapper library** that allows Windows 7's explorer.exe to run p
 
 **This project was forked from [Explorer7 but I won't sue you](https://github.com/Win10to7/explorer7-but-i-wont-sue-you) and not regular Explorer7. This fork follows the GPLv3 license without the extra terms that are not compliant with the GPLv3 license.**
 
-This fork was made to add specific changes for the Ex7 option in the upcoming Windows 10 to 7 Transformation Pack update **and will not work like regular Explorer7**.
+This fork was made to refine existing Explorer7 versions, **and will not behave like the original Explorer7**.
 
-## Known issues (Milestone 2 Update 3, last modified 2026-06-07)
+## Compatibility
+
+The explorer7 version this fork builds on only ran on Windows 10. This fork adds Windows 11, including 24H2.
+
+| Windows version | Status |
+| --------------- | ------ |
+| Windows 10 | ✅ Supported. Most testing is done on 21H2 (build 19044). |
+| Windows 11 21H2, 22H2 and 23H2 | ⚠️ Should work like the original explorer7, but not tested in this fork yet. |
+| Windows 11 24H2 (build 26100) | ✅ Supported. See the known issues below. |
+| Windows 11 25H2 (build 26200) | ⚠️ Should work, as it uses the same system files as 24H2, but not tested yet. |
+| Windows 8.1 and older, or anything newer than 25H2 | ❌ Not supported. explorer7 shows "This build of Windows is not supported." and closes. |
+
+**Windows 11 24H2**
+
+24H2 changed many of the system files explorer7 depends on. Every place where explorer7 hooks into Windows was checked against the 24H2 files and updated where needed, including the Start menu, search, the Windows key, taskbar pinning and the clock. Pinning also works when the Windows 7 explorer.exe runs from its own folder instead of the Windows folder. The technical details are in [`notes/24h2-support.md`](notes/24h2-support.md).
+
+**explorer.exe versions**
+
+explorer7 runs the explorer.exe from Windows 7 SP1. This fork can also run the explorer.exe from the pre-release Windows 8 build 7850. explorer7 works out which one it is running on its own.
+
+## Known issues (Milestone 2 Update 3, last modified 2026-10-09)
 These issues, unless specified to have been resolved in a later Windows version, are persistent across subsequent versions of Windows from their introduction.
 
 **MAKE SURE YOU READ THESE FIRST SO YOU ARE AWARE OF WHAT YOU ARE GETTING INTO!**
@@ -21,11 +41,7 @@ These issues, unless specified to have been resolved in a later Windows version,
 - If a user has StartIsBack++ installed, it may attempt to erroneously hook the shell, causing both visual and functional issues.
 
 **Windows 11 24H2 (26100)**
-- Every OS side hook was re-derived against the 26100 binaries, see `notes/24h2-support.md` for the full table.
-- The Win+X menu does nothing, the twinui.pcshell entry point that used to draw it is a stub on this build.
-- The Windows 7 style network flyout has nothing to attach to, 24H2 ships neither `pnidui.dll` nor `VAN.dll`.
-- 22H2 and 23H2 were not re-checked and keep the code paths they had.
-- Running the Windows 7 explorer.exe from its own folder rather than as `%SystemRoot%\explorer.exe` used to hide the pin verbs and swallow new taskbar pins, both are now handled.
+- The Windows key does nothing while a program running as administrator, such as Task Manager, is in front.
 
 **Windows 7 limitations/bugs**
 
@@ -122,7 +138,9 @@ By now, you should be able to start `explorer.exe` from task manager or through 
 
 ## Registry options
 
-These options are located under `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced`.
+These options are located under `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced`. The one exception is `WrpPath`, which goes under `HKEY_LOCAL_MACHINE` at the same path.
+
+Most options are only read when Explorer starts, so restart Explorer after changing one.
 
 | Name | Type | Description | Default Value |
 | ---- | ---- | ----------- | ------------- |
@@ -140,6 +158,17 @@ These options are located under `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\Cu
 | UseTaskbarPinning | REG_DWORD | Determines whether taskbar pinning functionality is available to the user. When set to 0, pins will not be loaded and cannot be modified from jumplists. | **1** |
 | ShellUIAccentOverride | REG_DWORD | Gives the taskbar, start menu and taskbar thumbnails real DWM blur behind instead of a Windows 10 accent fill, which is what Windows 7 actually did. This takes those three windows away from `ColorizationOptions`, so the two are not meant to be combined; set this to 0 to hand them back. Has no effect under Classic, high contrast, or with composition off. | **1** |
 | Win7DesktopIconRows | REG_DWORD | Spaces the desktop icon rows the way Windows 7 did. Windows 7 shared all of the space left at the bottom of the desktop between the rows, Windows 10 and 11 only share what is left beyond 30 percent of a row, so their rows sit a few pixels tighter. One row height covers every display, so with several displays this picks which one it is fitted to: **1** fits the main display, like single monitor Windows 7, and another display may fit one row fewer than it would otherwise; **2** fits the display at the top left of the whole desktop, which is the rule Windows 7 itself used; **0** keeps the stock rows. Applies with **Align icons to grid** on. Matched by byte pattern on Windows 10 19041 and Windows 11 26100 only, other builds keep the stock rows. Read at startup, restart Explorer after changing it. | **1** |
+| EnableWinXMenu | REG_DWORD | When set to 1, right-clicking the Start button opens a power user menu like the one in Windows 10, and Win+X opens it too. It has shortcuts to tools such as Device Manager, Disk Management, Task Manager and Run, plus a "Shut down or log off" submenu. Sleep and Hibernate appear in that submenu only when the Start menu's power button would show them. The console items follow Windows' own `DontUsePowerShellOnWinX` value: set it to 1 for Command Prompt or 0 for Windows PowerShell. When it is not set, Windows PowerShell is shown, like Windows 10 does. When EnableWinXMenu is 0, the Start button keeps its Windows 7 menu and Win+X does nothing. | **0** |
+| UseDCompFlyouts | REG_DWORD | When set to 0, the volume and network flyouts on the taskbar use the Windows 7 style instead of the modern style. When EnableImmersive is 0, the Windows 7 style is always used. | **0 (when EnableImmersive = 0)**, **1 (when EnableImmersive = 1)** |
+| CompactUserTile | REG_DWORD | When set to 1, the panel that opens when you click your user picture on the taskbar is smaller, with a smaller picture and no heading above your name. Only the build 7850 explorer has a user picture on the taskbar. The change shows the next time you open the panel. | **0** |
+| Win10SideSnap | REG_DWORD | On Windows 11, lets you snap a window to the left or right half of the screen by dragging it to the edge, like Windows 10 does. When set to 0, side snapping is off and so is Win10CornerSnap. All of the snap options need Windows 10 version 2004 or later, with EnableImmersive set to 1. | **1** |
+| Win10SideSnapFit | REG_DWORD | Makes two windows snapped side by side meet neatly in the middle, like Windows 7, instead of overlapping a little. Windows 11 only. Set to 0 to turn this off. | **1** |
+| Win10SideSnapTrim | REG_DWORD | After you drop a snapped window, adjusts its size so it does not stick out a few pixels under the taskbar or past the edge of the screen. Windows 11 only. Set to 0 to turn this off. | **1** |
+| Win10CornerSnap | REG_DWORD | Lets you snap a window to a quarter of the screen by dragging it into a corner, like Windows 10 does. When set to 0, windows only snap to the left or right half. | **1** |
+| WrpPath | REG_SZ / REG_EXPAND_SZ | The folder explorer7 is installed in. explorer7 looks there for its themes, orbs and language files. Variables like `%SystemRoot%` can be used. This one goes under `HKEY_LOCAL_MACHINE`. When it is not set, explorer7 uses the folder explorer.exe runs from. | **folder of explorer.exe** |
+| BuildRuntime | REG_DWORD | Tells explorer7 which explorer.exe it is running: 1 for Windows 7, 2 for the pre-release Windows 8 build 7850. explorer7 works this out by itself, so only set it if it gets it wrong. | **automatic** |
+| VetoImmersiveComponent8 | REG_DWORD | A safety switch for Windows 11. When set to 1, explorer7 skips the part of Windows that hosts the windows of immersive applications. Only use it if Explorer keeps crashing at startup, because immersive applications may not open while it is on. | **0** |
+| LogShellHooks | REG_DWORD | When set to 1, explorer7 logs every window event it gets from Windows, like a window opening, closing or being switched to. The log is `explorer7.log` in your `%TEMP%` folder, and it is only written if that file already exists, so create an empty one first. This writes a lot, so only turn it on while troubleshooting. | **0** |
 
 ## Theme support
 

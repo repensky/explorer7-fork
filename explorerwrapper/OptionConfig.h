@@ -24,6 +24,7 @@ extern DWORD s_AlphaValue;
 extern bool s_UseDCompFlyouts;
 extern bool s_ShellUIAccentOverride;
 extern int s_Win7DesktopIconRows;
+extern bool s_EnableWinXMenu;
 
 // Responsible for settings these values and calling them from registry
 extern void RefreshThemeConfiguration();

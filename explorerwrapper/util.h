@@ -1410,8 +1410,23 @@ BOOL WINAPI SetWindowBandNew(HWND hwnd, HWND hwndInsertAfter, DWORD flags)
 	return TRUE;
 }
 
+// Explorer7's own Win+X goes straight to user32 so a refusal is logged, not hidden
+BOOL RegisterHotKeyUnhooked(HWND hwnd, int id, UINT mod, UINT vk)
+{
+	if (RegisterHotKeyApiOrg)
+		return RegisterHotKeyApiOrg(hwnd, id, mod, vk);
+	return RegisterHotKey(hwnd, id, mod, vk);
+}
+
 BOOL WINAPI RegisterWindowHotkeyNew(HWND hwnd, int id, UINT mod, UINT vk)
 {
+	// twinui asks for Win+X too, the tray keeps it while the power user menu is on
+	if (s_EnableWinXMenu && vk == 'X' && (mod & 0xF) == MOD_WIN)
+	{
+		dbgprintf(L"RegisterHotKey id %d Win+X left to the power user menu", id);
+		return TRUE;
+	}
+
 	if (!RegisterHotKeyApiOrg(hwnd, id, mod, vk))
 		dbgprintf(L"RegisterHotKey id %d mod %X vk %X failed", id, mod, vk);
 	return TRUE;

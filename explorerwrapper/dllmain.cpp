@@ -42,6 +42,7 @@
 #include "PatternImports.h"
 #include "MinhookImports.h"
 #include "TypeDefinitions.h"
+#include "WinXMenu.h"
 
 static LRESULT ReloadInactiveThemeForTaskbar(HWND hwnd, WPARAM wParam, LPARAM lParam)
 {
@@ -81,6 +82,18 @@ static LRESULT ReloadInactiveThemeForTaskbar(HWND hwnd, WPARAM wParam, LPARAM lP
 LRESULT CALLBACK NewTrayProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	if (uMsg == 0x56D) return 0;
+
+	// Win+X is registered on this window, so it arrives on the tray thread
+	if (uMsg == WM_HOTKEY && wParam == WINX_HOTKEY_ID)
+	{
+		OpenWinXMenuFromKeyboard(hwnd);
+		return 0;
+	}
+	if (g_winXRegisterMsg && uMsg == g_winXRegisterMsg)
+	{
+		RegisterWinXHotkey(hwnd);
+		return 0;
+	}
 
 	// High contrast arrives as a settings change, composition as its own message
 	if (uMsg == WM_DWMCOMPOSITIONCHANGED || uMsg == WM_SETTINGCHANGE
@@ -326,6 +339,9 @@ void ShimDesktop()
 	g_prevDesktopProc = (WNDPROC)GetWindowLongPtr(hwnd_desktop, GWLP_WNDPROC);
 	SetWindowLongPtr(hwnd_desktop, GWLP_WNDPROC, (LONG_PTR)NewDesktopProc);
 	dbgprintf(L"desktop %p shell window %p tray %p", hwnd_desktop, GetShellWindow(), hwndTray);
+	// Set only while the power user menu is on, the subclass above registers Win+X on the tray thread
+	if (g_winXRegisterMsg)
+		PostMessage(hwndTray, g_winXRegisterMsg, 0, 0);
 	if (IsSwapShell())
 	{
 		EnsureShellWindow(hwnd_desktop);
@@ -756,6 +772,9 @@ void HookAPIs() // largely a legacy function now
 
 	// Account picture, tooltip and flyout for the tray user tile, 7850 only
 	HookUserTile();
+
+	// Win+X and the Start button right click show the power user menu when EnableWinXMenu is 1
+	InstallWinXMenu();
 
 	// Glass frame and native float gap for the legacy system flyouts
 	InstallFlyoutFix();
